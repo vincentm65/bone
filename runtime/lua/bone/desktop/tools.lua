@@ -571,13 +571,17 @@ local function foldable(t)
 end
 
 -- The phrase a tool view gives a call for summary lines ("loaded the money
--- skill"): called with ctx.summary, it may return { summary = "..." }.
+-- skill"): called with ctx.summary, it may return { summary = "..." }. With
+-- many = "loaded %d skills" too, its second result, calls that differ are
+-- said as one phrase.
 local function own_phrase(t, width)
   local view = bone.ui.tool_views[t.name]
   if not view then return nil end
   local ok, content = pcall(view, t, { summary = true, region = "chat", width = width })
   local s = ok and type(content) == "table" and content.summary or nil
-  return type(s) == "string" and s ~= "" and s or nil
+  if type(s) ~= "string" or s == "" then return nil end
+  local many = content.many
+  return s, type(many) == "string" and many:find("%d", 1, true) and many or nil
 end
 
 -- The longest command a summary line names; the rest of the line stays in view.
@@ -599,10 +603,11 @@ local function summary(calls, width)
   local function bump(key, t, phrase, unique)
     local s = seen[key]
     if not s then
-      s = { phrase = phrase, n = 0, unique = {}, first = t, running = false, plus = 0, minus = 0 }
+      s = { phrase = phrase, n = 0, calls = 0, unique = {}, first = t, running = false, plus = 0, minus = 0 }
       seen[key] = s
       order[#order + 1] = s
     end
+    s.calls = s.calls + 1
     s.running = s.running or not t.done
     if unique then
       if not s.unique[unique] then
@@ -624,9 +629,14 @@ local function summary(calls, width)
   end
   for _, t in ipairs(calls) do
     local path = args_of(t).path
-    local own = own_phrase(t, width)
+    local own, many = own_phrase(t, width)
     if own then
-      bump("own:" .. own, t, function(s) return { said(own .. (s.n > 1 and " " .. s.n .. " times" or "")) } end)
+      -- With `many`, calls that say different things are counted by what
+      -- they say ("loaded 3 skills"); one thing said is said as it is.
+      bump(many and "many:" .. many or "own:" .. own, t, function(s)
+        if many and s.n > 1 then return { said((many:gsub("%%d", tostring(s.n), 1))) } end
+        return { said(own .. (s.calls > 1 and " " .. s.calls .. " times" or "")) }
+      end, many and own or nil)
     elseif t.name == "read_file" then
       bump("read", t, files("read", "reading"), type(path) == "string" and path or t.id)
     elseif t.name == "write_file" then

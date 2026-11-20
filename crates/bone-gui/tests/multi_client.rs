@@ -255,6 +255,42 @@ async fn events_arrive_in_order() {
     assert_eq!(gui.gui.transcript(), live);
 }
 
+/// A tool view's `many` phrase says calls that differ as one count in the
+/// summary line, as in the TUI.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_summary_counts_calls_whose_view_gives_a_many_phrase() {
+    let e = env(
+        vec![
+            shell("c1", "echo one"),
+            shell("c2", "echo two"),
+            shell("c3", "echo three"),
+            text("all done"),
+        ],
+        Ask::No,
+    )
+    .await;
+    let mut gui = e.gui().await;
+    gui.gui
+        .run_lua(
+            "t",
+            "bone.ui.tool_views.shell = function(item, ctx)
+               if ctx.summary then
+                 return { summary = 'said ' .. item.arguments.command:sub(6), many = 'said %d words' }
+               end
+             end",
+        )
+        .unwrap();
+    gui.send("say them");
+    gui.wait_for(WAIT, |g| g.transcript().contains("all done") && idle(g))
+        .await
+        .unwrap();
+    // The summary types itself out over a few frames.
+    gui.wait_for(WAIT, |g| g.transcript().contains("Said 3 words"))
+        .await
+        .unwrap();
+    assert!(!gui.gui.transcript().contains("said one"));
+}
+
 /// 5: a question answered in one client disappears from the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_question_answered_in_one_client_closes_in_the_other() {
