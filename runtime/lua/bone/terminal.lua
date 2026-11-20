@@ -485,9 +485,13 @@ local function mouse_code(t, ev, row, col)
     code = button == "up" and 64 or 65
   else
     code = button and ({ left = 0, middle = 1, right = 2 })[button] or (action == "move" and 35)
-    if code == nil then return end
+    if not code then return end -- a button xterm has no report for (back, forward)
+    -- A release names its button in SGR, where the final "m" says it is one
+    -- (tmux picks MouseUp1Pane, MouseDragEnd1Pane, … by that number, and
+    -- passes it on to the program in the pane). The older encodings have
+    -- no such letter: there 3 is the release, of whichever button.
     if action == "up" then
-      code = 3
+      if t.screen.mouse_encoding ~= "sgr" then code = 3 end
     elseif action == "drag" then
       code = code + 32
     end
