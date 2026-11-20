@@ -199,7 +199,7 @@ async fn full_turn_with_approval_then_resume() {
     // The session list shows it.
     again.press("ctrl+o").unwrap();
     let screen = again
-        .wait_for(WAIT, |s| s.contains("Recent"))
+        .wait_for(WAIT, |s| s.contains("Active · "))
         .await
         .unwrap();
     assert!(screen.contains("run it"), "{screen}");
