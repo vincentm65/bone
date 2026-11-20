@@ -51,6 +51,9 @@ pub struct Plugin {
     pub error: Option<String>,
     /// Modules first `require`d while it loaded.
     modules: Vec<String>,
+    /// Its Lua files when it last loaded (`handover::fingerprint`): a
+    /// reload hands it nothing over once they differ.
+    pub fingerprint: u64,
 }
 
 impl Plugin {
@@ -81,10 +84,12 @@ pub fn parts(dir: &Path) -> (bool, Vec<&'static str>) {
     (has("core.lua"), frontends)
 }
 
-/// The known plugins, and the `bone.plugin.on_shutdown` hooks by owner.
+/// The known plugins, the `bone.plugin.on_shutdown` hooks by owner, and
+/// the `bone.plugin.carry` functions.
 pub struct PluginStore<'a> {
     pub plugins: &'a mut Vec<Plugin>,
     pub shutdown_hooks: &'a mut Vec<(Option<String>, u64)>,
+    pub carry_hooks: &'a mut Vec<super::handover::CarryHook>,
 }
 
 pub(super) fn dispatch<H: Host>(
@@ -198,6 +203,7 @@ pub fn register_plugin<H: Host>(h: &mut H, name: &str, dir: &Path, kind: Kind) {
             loaded: false,
             error: None,
             modules: Vec::new(),
+            fingerprint: 0,
         });
     }
 }
@@ -220,6 +226,7 @@ pub fn load_plugin<H: Host>(h: &mut H, name: &str, dir: &Path, kind: Kind) {
         Ok(())
     });
     let before = h.with_api(loaded_modules).unwrap_or_default();
+    let fingerprint = super::handover::fingerprint(dir);
     let prev = h.owners().owner.replace(name.to_owned());
     let mut error = None;
     for file in h.config_files().iter().map(|f| dir.join(f)) {
@@ -259,6 +266,7 @@ pub fn load_plugin<H: Host>(h: &mut H, name: &str, dir: &Path, kind: Kind) {
         .expect("plugin entry");
     p.loaded = true;
     p.error = error;
+    p.fingerprint = fingerprint;
     p.modules = after.into_iter().filter(|m| !before.contains(m)).collect();
     let info = p.info();
     fire(h, "plugin/loaded", info);
@@ -320,6 +328,7 @@ pub fn unload_plugin<H: Host>(h: &mut H, name: &str) -> Result<(), String> {
         }
         Ok(())
     });
+    (h.plugin_store().carry_hooks).retain(|(o, _, _)| o.as_deref() != Some(name));
     // Callbacks it still owns belong to things that are gone.
     let gone: Vec<u64> = (h.owners().callback_owner.iter())
         .filter(|(_, o)| o.as_str() == name)

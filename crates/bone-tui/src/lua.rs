@@ -239,6 +239,8 @@ impl App {
     pub fn reload_user_config(&mut self) -> bool {
         // The new state reads plugin state from disk, so write it first.
         self.save_plugin_states(None);
+        // What the old state hands the new one in memory (bone.plugin.carry).
+        bone_ui::lua::handover::collect(self);
         self.carried_options = self
             .dynamic_options
             .iter()
@@ -264,6 +266,8 @@ impl App {
             .cloned();
         if self.lua.is_none() || fresh.is_some() {
             let new = self.swap_lua_side(old);
+            bone_ui::lua::handover::reject(self);
+            bone_ui::lua::handover::finish(self);
             self.retire_lua_side(new);
             self.options = options;
             let (context, message) = fresh.unwrap_or_else(|| ("lua".into(), "cannot start".into()));
@@ -279,11 +283,22 @@ impl App {
             return false;
         }
         self.load_failures = errors.iter().map(failure_key).collect();
+        // The jobs the new state took over (bone.job.adopt) move to it
+        // before the old state's shutdown hooks could stop them.
+        let mut old = old;
+        bone_ui::lua::handover::accept(self, &mut old.jobs);
+        bone_ui::lua::handover::finish(self);
+        let focus = old.panel_focus.clone();
         // The old state's shutdown hooks run on it, just before it goes.
         let new = self.swap_lua_side(old);
         self.run_shutdown(None);
         let old = self.swap_lua_side(new);
         self.retire_lua_side(old);
+        // The keyboard stays where it was: the prompt, or a panel the new
+        // state opened again.
+        if focus.is_none() || self.panels.iter().any(|p| Some(&p.id) == focus.as_ref()) {
+            self.panel_focus = focus;
+        }
         self.info("Lua configuration reloaded");
         true
     }
@@ -787,6 +802,7 @@ impl bone_ui::lua::Host for App {
         bone_ui::lua::plugins::PluginStore {
             plugins: &mut self.plugins,
             shutdown_hooks: &mut self.shutdown_hooks,
+            carry_hooks: &mut self.carry_hooks,
         }
     }
 
@@ -814,6 +830,10 @@ impl bone_ui::lua::Host for App {
 
     fn jobs(&mut self) -> &mut bone_ui::jobs::Jobs {
         &mut self.jobs
+    }
+
+    fn handover(&mut self) -> &mut bone_ui::lua::handover::Handover {
+        &mut self.handover
     }
 
     fn job_sink(&self) -> bone_ui::jobs::Sink {

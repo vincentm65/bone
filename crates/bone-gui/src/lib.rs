@@ -161,6 +161,14 @@ pub struct Gui {
     /// The draft last measured, shared with the frame's font metrics so an
     /// idle frame does not copy it.
     draft_rc: Rc<str>,
+    /// The last id handed out for a stored Lua callback (or job). Not part
+    /// of a Lua state, so ids never repeat across reloads: a reply or timer
+    /// meant for a replaced state cannot reach a callback of the new one.
+    pub(crate) next_callback: u64,
+    /// What a reload in progress hands from the old Lua state to the new.
+    pub(crate) handover: bone_ui::lua::handover::Handover,
+    /// While a reload loads: the panels open before it, for `ready`.
+    pub(crate) reload_panels: Option<Vec<String>>,
     /// Hash of the Lua sources last seen, and whether a check is running.
     /// `None` until the window is first focused.
     config_hash: Option<u64>,
@@ -225,6 +233,9 @@ impl Gui {
             view: Default::default(),
             previews: Default::default(),
             draft_rc: Rc::from(""),
+            next_callback: 0,
+            handover: Default::default(),
+            reload_panels: None,
             config_hash: None,
             config_checking: false,
             was_focused: false,
