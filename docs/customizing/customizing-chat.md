@@ -57,6 +57,8 @@ lines; `lines` sit indented under it). Return `nil` for the built-in content
 (`bone.ui.tool_content`). Called with `ctx.summary`, a view may return
 `{ summary = "loaded the money skill" }`: summary lines use that phrase for
 the call in place of `called name` (the same phrase twice reads `… 2 times`).
+With `many = "loaded %d skills"` beside it, calls whose phrases differ read as
+one count: `loaded 3 skills`.
 
 ```lua
 -- a compact one-line summary for a specific tool

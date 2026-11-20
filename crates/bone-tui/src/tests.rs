@@ -3482,6 +3482,16 @@ async fn std_tool_screen(
     ctrl_t: usize,
 ) -> Vec<String> {
     let mut h = Harness::build(None).await;
+    tool_screen(&mut h, calls, width, ctrl_t).await
+}
+
+/// The chat rows under a turn of `calls` (name, arguments, output, failed).
+async fn tool_screen(
+    h: &mut Harness,
+    calls: &[(&str, Value, &str, bool)],
+    width: u16,
+    ctrl_t: usize,
+) -> Vec<String> {
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     let list = calls
@@ -3620,6 +3630,52 @@ async fn standard_tool_views_match_the_first_bone() {
         assert!(text.contains(want), "{want:?} in\n{text}");
     }
     assert!(!text.contains("⋮"), "{text}");
+}
+
+/// A tool view's `many` phrase says calls that differ as one count; one
+/// call, or the same one again, keeps its own phrase.
+#[tokio::test]
+async fn a_summary_counts_calls_whose_view_gives_a_many_phrase() {
+    let config = r#"
+        bone.ui.tool_views.skill = function(item, ctx)
+          local name = item.arguments.name
+          if not ctx.summary then return { title = "skill " .. name } end
+          if item.is_error then
+            return { summary = "looked for a " .. name .. " skill", many = "looked for %d skills" }
+          end
+          return { summary = "loaded the " .. name .. " skill", many = "loaded %d skills" }
+        end
+        bone.ui.tool_views.note = function(_, ctx)
+          return ctx.summary and { summary = "took a note" } or { title = "note" }
+        end
+    "#;
+    let skill = |name: &str, failed: bool| ("skill", json!({ "name": name }), "", failed);
+    let note = ("note", json!({}), "", false);
+    for (calls, want) in [
+        (
+            vec![skill("money", false), skill("pdf", false), note.clone(), skill("docx", false)],
+            "    Loaded 3 skills, took a note",
+        ),
+        // The same skill again is not another skill; a view without `many`
+        // counts its calls as before.
+        (
+            vec![skill("money", false), skill("pdf", false), skill("money", false), note.clone(), note.clone()],
+            "    Loaded 2 skills, took a note 2 times",
+        ),
+        (vec![skill("money", false)], "    Loaded the money skill"),
+        (
+            vec![skill("money", false), skill("money", false)],
+            "    Loaded the money skill 2 times",
+        ),
+        (
+            vec![skill("money", false), skill("nope", true), skill("pdf", false)],
+            "    Loaded 2 skills, looked for a nope skill, 1 failed",
+        ),
+    ] {
+        let (mut h, _dir) = Harness::with_config(config).await;
+        let rows = tool_screen(&mut h, &calls, 70, 0).await;
+        assert_eq!(rows[1], want, "{}", rows.join("\n"));
+    }
 }
 
 #[tokio::test]

@@ -739,7 +739,9 @@ local function arg(t, key)
 end
 
 -- The phrase a tool view gives a call for summary lines ("loaded the money
--- skill"): called with ctx.summary, it may return { summary = "..." }.
+-- skill"): called with ctx.summary, it may return { summary = "..." }. With
+-- many = "loaded %d skills" too, its second result, calls that differ are
+-- said as one phrase.
 local function own_phrase(t, width)
   local view = bone.ui.tool_views[t.name]
   if not view then
@@ -747,7 +749,11 @@ local function own_phrase(t, width)
   end
   local ok, content = pcall(view, t, { summary = true, region = "chat", width = width })
   local s = ok and type(content) == "table" and content.summary or nil
-  return type(s) == "string" and s ~= "" and s or nil
+  if type(s) ~= "string" or s == "" then
+    return nil
+  end
+  local many = content.many
+  return s, type(many) == "string" and many:find("%d", 1, true) and many or nil
 end
 
 
@@ -760,10 +766,11 @@ local function summary(calls, width)
   local function bump(key, phrase, unique)
     local s = seen[key]
     if not s then
-      s = { phrase = phrase, n = 0, unique = {}, plus = 0, minus = 0, counted = false }
+      s = { phrase = phrase, n = 0, calls = 0, unique = {}, plus = 0, minus = 0, counted = false }
       seen[key] = s
       order[#order + 1] = s
     end
+    s.calls = s.calls + 1
     if unique then
       if not s.unique[unique] then
         s.unique[unique] = true
@@ -774,9 +781,14 @@ local function summary(calls, width)
     end
   end
   for _, t in ipairs(calls) do
-    local own = own_phrase(t, width)
+    local own, many = own_phrase(t, width)
     if own then
-      bump("own:" .. own, function(n) return own .. (n > 1 and " " .. n .. " times" or "") end)
+      -- With `many`, calls that say different things are counted by what
+      -- they say ("loaded 3 skills"); one thing said is said as it is.
+      bump(many and "many:" .. many or "own:" .. own, function(n, calls)
+        if many and n > 1 then return (many:gsub("%%d", tostring(n), 1)) end
+        return own .. (calls > 1 and " " .. calls .. " times" or "")
+      end, many and own or nil)
     elseif t.name == "read_file" then
       bump("read", function(n) return "read " .. plural(n, "file") end, arg(t, "path") or t.id)
     elseif t.name == "write_file" then
@@ -810,7 +822,7 @@ local function summary(calls, width)
     -- The edit phrase always closes the chain, so its counts sit at the
     -- line's end rather than floating away from it.
     if s ~= seen.edit then
-      parts[#parts + 1] = s.phrase(s.n)
+      parts[#parts + 1] = s.phrase(s.n, s.calls)
     end
   end
   local edit = seen.edit
