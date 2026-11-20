@@ -1,6 +1,6 @@
 {
   "name": "bone-agent",
-  "version": "3.0.10",
+  "version": "3.0.11",
   "description": "bone: a coding agent for your terminal and desktop. A small Rust core, any OpenAI-compatible model, scriptable in Lua.",
   "keywords": [
     "ai",
@@ -25,11 +25,11 @@
     "bin"
   ],
   "optionalDependencies": {
-    "bone-agent-linux-x64": "3.0.10",
-    "bone-agent-linux-arm64": "3.0.10",
-    "bone-agent-darwin-x64": "3.0.10",
-    "bone-agent-darwin-arm64": "3.0.10",
-    "bone-agent-windows-x64": "3.0.10"
+    "bone-agent-linux-x64": "3.0.11",
+    "bone-agent-linux-arm64": "3.0.11",
+    "bone-agent-darwin-x64": "3.0.11",
+    "bone-agent-darwin-arm64": "3.0.11",
+    "bone-agent-windows-x64": "3.0.11"
   },
   "engines": {
     "node": ">=18"
