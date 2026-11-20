@@ -304,8 +304,11 @@ impl Session {
             write_record(&mut self.file, r.clone())?;
             apply(&mut self.info, r);
         }
-        self.reindex();
-        Ok(!records.is_empty())
+        let changed = !records.is_empty();
+        if changed {
+            self.reindex();
+        }
+        Ok(changed)
     }
 
     /// Move to `cwd` (nothing moves if the file write fails): tools run there
