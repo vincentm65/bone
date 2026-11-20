@@ -518,8 +518,11 @@ local function card(item, expanded, width)
   elseif name == "edit_file" then
     local rows, plus, minus, n, all = diff_rows(a)
     if ok or not item.done then
-      extra("+" .. plus, "DiffAdd")
+      -- "(+2 −1)", the amounts in the diff colors.
+      extra("(")
+      meta[#meta + 1] = { text = "+" .. plus, hl = "DiffAdd" }
       meta[#meta + 1] = { text = " −" .. minus, hl = "DiffDelete" }
+      meta[#meta + 1] = { text = ")", hl = "Dim" }
       if n > 1 then extra(plural(n, "edit")) end
       if all then extra("replace all") end
       -- Condensed: the stub line only (the counts carry the edit's size,
@@ -683,10 +686,10 @@ local function summary(calls, width)
     for _, span in ipairs(edit.phrase(edit)) do spans[#spans + 1] = span end
     if edit.plus > 0 or edit.minus > 0 then
       -- The counts, in the diff colors.
-      spans[#spans + 1] = said(" (+")
+      spans[#spans + 1] = said(" (")
       spans[#spans + 1] = { text = "+" .. edit.plus, hl = "DiffAdd" }
       spans[#spans + 1] = said(" ")
-      spans[#spans + 1] = { text = "-" .. edit.minus, hl = "DiffDelete" }
+      spans[#spans + 1] = { text = "−" .. edit.minus, hl = "DiffDelete" }
       spans[#spans + 1] = said(")")
     end
   end
