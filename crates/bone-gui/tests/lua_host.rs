@@ -674,8 +674,8 @@ async fn the_standard_library() {
              assert(#e.node == 1 and stub.bg == nil, 'condensed: the stub line alone, no card')
              local head = stub[1]
              local meta = head[4]
-             assert(meta.spans[1].hl == 'DiffAdd' and meta.spans[2].hl == 'DiffDelete',
-               'the +/- counts in the diff colors')
+             assert(meta.spans[1].text == '(' and meta.spans[2].hl == 'DiffAdd' and meta.spans[3].hl == 'DiffDelete'
+               and meta.spans[4].text == ')', 'the +/- counts in brackets, in the diff colors')
              bone.o.tool_detail = 'full'
              local e = bone.ui.views.tool({ kind = 'tool', id = 'c2b', name = 'edit_file',
                arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
