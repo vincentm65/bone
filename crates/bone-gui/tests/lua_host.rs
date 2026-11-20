@@ -237,22 +237,13 @@ async fn ctrl_o_opens_the_sessions_sidebar() {
 }
 
 /// The sidebar has the TUI's sections (a chat touched within the last hour
-/// is under "Active"), and pins with ctrl+t where the TUI reads
-/// them; the desktop's own old pins move there.
+/// is under "Active"), and pins with ctrl+t in the core, where the TUI
+/// reads them.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
+async fn the_sidebar_has_the_tui_sections_and_pins_in_the_core() {
     use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let pins = config.path().join("state/shared/sessions-pinned.json");
-    std::fs::create_dir_all(config.path().join("state/gui")).unwrap();
-    std::fs::write(
-        config.path().join("state/gui/sidebar-pinned.json"),
-        r#"{ "old-chat": true }"#,
-    )
-    .unwrap();
     let mut g = gui(config.path(), work.path()).await;
-    let moved = std::fs::read_to_string(&pins).unwrap();
-    assert!(moved.contains("old-chat"), "{moved}");
     g.frame();
     g.gui
         .run_lua(
@@ -279,19 +270,18 @@ async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
             && !painted.iter().any(|t| t == "Pinned"),
         "the new chat is not active; painted {painted:?}"
     );
-    // ctrl+t from its search field pins the selected chat, in the file
-    // the TUI reads.
+    // ctrl+t from its search field pins the selected chat, in the core.
     g.key(Key::Char('t'), Modifiers::CTRL);
     g.frame();
+    g.settle(Duration::from_millis(300)).await;
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
         painted.iter().any(|t| t == "Pinned") && !painted.iter().any(|t| t == "Active"),
         "ctrl+t did not pin it; painted {painted:?}"
     );
-    let id = g.gui.eval("bone.chat.session().session_id").unwrap();
-    let saved = std::fs::read_to_string(&pins).unwrap();
-    assert!(saved.contains(&id) && saved.contains("old-chat"), "{saved}");
+    let pinned = g.gui.eval("tostring(bone.chat.session().pinned)").unwrap();
+    assert_eq!(pinned, "true");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 

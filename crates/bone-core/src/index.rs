@@ -7,13 +7,15 @@
 //! `index.db` and it comes back. It holds no transcript copies beyond the
 //! user and assistant text kept for search.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bone_proto::types::ChatMessage;
+use bone_proto::types::{ChatMessage, SessionInfo};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -22,7 +24,7 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 6;
+const VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
@@ -30,10 +32,13 @@ CREATE TABLE sessions (
     parent      TEXT,
     root        TEXT,               -- the top-level session a subagent works for
     cwd         TEXT NOT NULL,
+    owner       TEXT,               -- a subagent's SessionOwner, as JSON
     title       TEXT,               -- the first user message
-    renamed     TEXT,               -- a title given with session/rename
+    renamed     TEXT,               -- a title given with session/set
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    archived    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,   -- its last message
     messages    INTEGER NOT NULL DEFAULT 0
 );
 -- How far each session's file is indexed.
@@ -101,6 +106,8 @@ pub struct Index {
     conn: Mutex<Connection>,
     /// When a failed sync last checked the database for corruption.
     checked: Mutex<Option<Instant>>,
+    /// It was started over while running, empty until caught up again.
+    reset: AtomicBool,
 }
 
 type Result<T> = std::result::Result<T, String>;
@@ -150,17 +157,18 @@ impl Index {
             path: path.to_owned(),
             conn: Mutex::new(conn),
             checked: Mutex::new(None),
+            reset: AtomicBool::new(false),
         })
     }
 
     /// Index what was appended to session `id`'s file since last time. A
     /// file that shrank, or was never seen, is indexed from the start.
-    /// `renamed` sets the title a rename gave.
+    /// Whether there was anything new.
     ///
     /// A failure checks the database (at most once a minute); a corrupt one
-    /// is moved aside and started over, refilled as sessions are synced.
-    pub fn sync(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
-        let result = self.sync_once(id, path, renamed);
+    /// is moved aside and started over (see [`Index::take_reset`]).
+    pub fn sync(&self, id: &str, path: &Path) -> Result<bool> {
+        let result = self.sync_once(id, path);
         if result.is_err() && self.check_due() && corrupt(&self.conn.lock().unwrap()) {
             eprintln!("bone: session index is corrupt; starting it over");
             let mut conn = self.conn.lock().unwrap();
@@ -168,8 +176,15 @@ impl Index {
             *conn = Connection::open_in_memory().map_err(err)?;
             quarantine(&self.path);
             *conn = Self::open_once(&self.path)?.conn.into_inner().unwrap();
+            self.reset.store(true, Ordering::Relaxed);
         }
         result
+    }
+
+    /// Whether it was started over since last asked: every session file
+    /// must be synced again.
+    pub fn take_reset(&self) -> bool {
+        self.reset.swap(false, Ordering::Relaxed)
     }
 
     /// Whether a failure may pay for an integrity check (once a minute).
@@ -182,7 +197,7 @@ impl Index {
         true
     }
 
-    fn sync_once(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
+    fn sync_once(&self, id: &str, path: &Path) -> Result<bool> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -197,10 +212,11 @@ impl Index {
             .map_err(err)?;
         let len = std::fs::metadata(path).map_err(err)?.len();
         let (mut offset, mut seq, mut last_at) = known.unwrap_or_default();
+        let start = offset;
         // A session's rows are written with its `files` row, so one never
         // seen has none to clear.
         if offset > len {
-            clear(&tx, id, false)?;
+            clear(&tx, id)?;
             (offset, seq) = (0, 0);
         }
         if offset < len {
@@ -221,7 +237,10 @@ impl Index {
                     continue;
                 };
                 let at = line.at.unwrap_or(last_at);
-                last_at = last_at.max(at);
+                // Only messages are activity (not a rename or a pin).
+                if matches!(line.record, Record::Message(_)) {
+                    last_at = last_at.max(at);
+                }
                 index_record(&tx, id, line.record, at, &mut seq)?;
             }
         }
@@ -236,30 +255,39 @@ impl Index {
             params![id, seq, last_at],
         )
         .map_err(err)?;
-        if let Some(title) = renamed {
-            tx.execute(
-                "UPDATE sessions SET renamed = ?2 WHERE id = ?1",
-                params![id, title],
-            )
-            .map_err(err)?;
-        }
-        tx.commit().map_err(err)
+        tx.commit().map_err(err)?;
+        Ok(offset != start)
     }
 
-    pub fn rename(&self, id: &str, title: &str) -> Result<()> {
+    /// Every indexed session as listed, by id.
+    pub fn sessions(&self) -> Result<HashMap<String, SessionInfo>> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE sessions SET renamed = ?2 WHERE id = ?1",
-            params![id, title],
-        )
-        .map(drop)
-        .map_err(err)
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, cwd, created_at, coalesce(renamed, title), parent, owner, pinned, archived
+                 FROM sessions",
+            )
+            .map_err(err)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SessionInfo {
+                session_id: r.get(0)?,
+                cwd: r.get(1)?,
+                created_at: r.get(2)?,
+                title: r.get(3)?,
+                parent: r.get(4)?,
+                owner: (r.get::<_, Option<String>>(5)?).and_then(|o| serde_json::from_str(&o).ok()),
+                pinned: r.get(6)?,
+                archived: r.get(7)?,
+            })
+        });
+        let rows = rows.map_err(err)?.filter_map(|r| r.ok());
+        Ok(rows.map(|i| (i.session_id.clone(), i)).collect())
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(err)?;
-        clear(&tx, id, true)?;
+        clear(&tx, id)?;
         tx.commit().map_err(err)
     }
 
@@ -365,19 +393,15 @@ fn quarantine(path: &Path) {
     }
 }
 
-/// Remove a session's rows; its `sessions` row too when `all`, else just
-/// what is rebuilt from the file.
-fn clear(tx: &Transaction, id: &str, all: bool) -> Result<()> {
+/// Remove a session's rows (its file makes them all again).
+fn clear(tx: &Transaction, id: &str) -> Result<()> {
     for t in ["files", "messages", "search", "usage", "tool_calls"] {
         tx.execute(&format!("DELETE FROM {t} WHERE session_id = ?1"), [id])
             .map_err(err)?;
     }
-    let sql = if all {
-        "DELETE FROM sessions WHERE id = ?1"
-    } else {
-        "UPDATE sessions SET title = NULL, messages = 0 WHERE id = ?1"
-    };
-    tx.execute(sql, [id]).map(drop).map_err(err)
+    tx.execute("DELETE FROM sessions WHERE id = ?1", [id])
+        .map(drop)
+        .map_err(err)
 }
 
 fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u64) -> Result<()> {
@@ -386,17 +410,24 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
         // An agent's root is its owner's (the owner until that is indexed,
         // which then moves its agents over).
         Record::Session(h) => run(
-            "INSERT INTO sessions (id, parent, root, cwd, created_at, updated_at)
-                 VALUES (?1, ?2, (SELECT coalesce(max(root), ?3) FROM sessions WHERE id = ?3), ?4, ?5, ?5)
-             ON CONFLICT(id) DO UPDATE SET parent = ?2, root = excluded.root, cwd = ?4, created_at = ?5",
-            params![id, h.parent, h.owner.map(|o| o.session_id), h.cwd, h.created_at],
+            "INSERT INTO sessions (id, parent, root, cwd, created_at, updated_at, owner)
+                 VALUES (?1, ?2, (SELECT coalesce(max(root), ?3) FROM sessions WHERE id = ?3), ?4, ?5, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET parent = ?2, root = excluded.root, cwd = ?4, created_at = ?5, owner = ?6",
+            params![
+                id,
+                h.parent,
+                h.owner.as_ref().map(|o| &o.session_id),
+                h.cwd,
+                h.created_at,
+                h.owner.as_ref().and_then(|o| serde_json::to_string(o).ok())
+            ],
         )
         .and_then(|()| run("UPDATE sessions SET root = coalesce((SELECT root FROM sessions WHERE id = ?1), ?1) WHERE root = ?1", params![id])),
         Record::Compact(_) | Record::Summary(_) | Record::Model(_) => Ok(()),
-        Record::Cwd(cwd) => run(
-            "UPDATE sessions SET cwd = ?2 WHERE id = ?1",
-            params![id, cwd],
-        ),
+        Record::Cwd(cwd) => run("UPDATE sessions SET cwd = ?2 WHERE id = ?1", params![id, cwd]),
+        Record::Title(t) => run("UPDATE sessions SET renamed = ?2 WHERE id = ?1", params![id, t]),
+        Record::Pinned(on) => run("UPDATE sessions SET pinned = ?2 WHERE id = ?1", params![id, on]),
+        Record::Archived(on) => run("UPDATE sessions SET archived = ?2 WHERE id = ?1", params![id, on]),
         Record::Usage(u) => run(
             "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
                                 input_tokens, output_tokens, cached_tokens, context_tokens)
@@ -513,7 +544,7 @@ mod tests {
         let (done_tx, done) = std::sync::mpsc::channel();
         let task = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            done_tx.send(index.sync("s", &file, None)).unwrap();
+            done_tx.send(index.sync("s", &file)).unwrap();
         });
         started.recv_timeout(Duration::from_secs(2)).unwrap();
         // A deferred transaction reads first, then fails its write upgrade
@@ -549,7 +580,7 @@ mod tests {
         // Not a database at all.
         std::fs::write(&db, vec![0x55u8; 8192]).unwrap();
         let index = Index::open(&db).unwrap();
-        index.sync("s", &file, None).unwrap();
+        index.sync("s", &file).unwrap();
         assert!(dir.path().join("index.db.corrupt").exists());
 
         // Corrupted while open: a mangled schema, its version bumped so the
@@ -568,7 +599,7 @@ mod tests {
             ))
             .unwrap();
         drop(other);
-        assert!(index.sync("s", &file, None).is_err());
-        index.sync("s", &file, None).unwrap();
+        assert!(index.sync("s", &file).is_err());
+        index.sync("s", &file).unwrap();
     }
 }

@@ -528,7 +528,7 @@ async fn standard_ui_shows_what_waits_for_you() {
     // The sidebar's rows: a dot before the title, which blinks while the
     // chat waits (its color comes and goes), and stays for a reply not seen.
     h.input("{ctrl+o}").await;
-    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.unfold_archive().await;
     h.settle().await;
     let screen = h.screen(100, 30);
     assert!(screen.contains("second"), "{screen}");

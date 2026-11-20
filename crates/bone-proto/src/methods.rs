@@ -157,7 +157,7 @@ pub const METHODS: &[&str] = &[
     SessionList::METHOD,
     SessionActive::METHOD,
     SessionMessages::METHOD,
-    SessionRename::METHOD,
+    SessionSet::METHOD,
     SessionCd::METHOD,
     SessionDelete::METHOD,
     SessionCompact::METHOD,
@@ -221,6 +221,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     SessionCompacted::METHOD,
     SessionDeleted::METHOD,
     SessionCreated::METHOD,
+    SessionChanged::METHOD,
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
     SettingsChanged::METHOD,
@@ -357,19 +358,25 @@ pub struct SessionMessagesResult {
 }
 
 method!(
-    /// Give a session a title (replacing the one taken from its first
-    /// message).
-    SessionRename, "session/rename", SessionRenameParams => SessionInfo
+    /// Change what a session is called and where it is listed: a title
+    /// (replacing the one taken from its first message), pinned, archived.
+    /// Fields left out stay; a change comes as `session/changed`.
+    SessionSet, "session/set", SessionSetParams => SessionInfo
 );
 method!(
     /// Delete a session and its file. Not while a turn runs.
     SessionDelete, "session/delete", SessionRef => ()
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRenameParams {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSetParams {
     pub session_id: SessionId,
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 method!(
@@ -971,6 +978,10 @@ notification!(
 notification!(
     /// A session was created (by any client, or by core Lua for a subagent).
     SessionCreated, "session/created", SessionInfo
+);
+notification!(
+    /// A session's info changed: its title, folder, pinned or archived.
+    SessionChanged, "session/changed", SessionInfo
 );
 notification!(
     /// A session was deleted (by any client).

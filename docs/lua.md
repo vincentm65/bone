@@ -168,7 +168,7 @@ Every part is optional. Plugins load in name order, after the runtime defaults a
 
 `bone.plugin.current()` is `{ name, dir, kind }` while a plugin's file runs, and in either frontend while its owned callbacks run, else nil.
 
-`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Core, TUI and GUI have it, with separate `core`, `tui` and `gui` directories. With `{ shared = true }` as the last argument they use `~/.bone/state/shared/<name>.json`, which is how a plugin's core and frontend halves can share settings (a save replaces the file atomically; the last writer wins).
+`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Core, TUI and GUI have it, with separate `core`, `tui` and `gui` directories (a save replaces the file atomically).
 
 In either frontend a plugin owns what it creates while its `ui.lua`, frontend-specific file or one of its callbacks runs: keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic options, raw key interceptors and new keymap contexts. Unloading it removes all of that (a key or command the user has since redefined is left alone), cancels its running jobs without calling back, and forgets the modules it `require`d, so loading it again runs fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
 

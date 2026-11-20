@@ -122,9 +122,8 @@ bone.plugin.on_shutdown(function() ... end)  -- explicit unload, reload and quit
 `bone.state.load(name)` / `bone.state.save(name, value)` are the raw form:
 JSON at `~/.bone/state/core/`, `state/tui/` or `state/gui/` (`<name>.json`).
 `bone.plugin.state(name)` wraps that file. Each of the core, the TUI and the
-GUI has its own. With `{ shared = true }` as the last argument every side
-uses `~/.bone/state/shared/<name>.json`, which is how a plugin's core and
-frontend halves share settings.
+GUI has its own; settings a plugin's halves share go in `settings.json`
+(`bone.settings`).
 
 A plugin owns what it creates while its file runs, or while any of its
 callbacks run, in either frontend: keymaps, user commands, `bone.on`

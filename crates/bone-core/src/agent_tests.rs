@@ -2193,17 +2193,23 @@ async fn sessions_can_be_renamed_and_deleted() {
     let sid = h.session_id.clone();
 
     let info = h
-        .call::<SessionRename>(SessionRenameParams {
+        .call::<SessionSet>(SessionSetParams {
             session_id: sid.clone(),
-            title: "  Typo hunt ".into(),
+            title: Some("  Typo hunt ".into()),
+            pinned: Some(true),
+            ..Default::default()
         })
         .await
         .unwrap();
     assert_eq!(info.title.as_deref(), Some("Typo hunt"));
-    assert_eq!(h.until::<SessionUpdated>().await.reason, "rename");
-    // The title survives a restart, and shows in the list.
+    assert_eq!(h.until::<SessionChanged>().await, info);
+    // It survives a restart, and shows in the list.
     let store = crate::session::SessionStore::new(h._data.path());
-    assert_eq!(store.list().unwrap()[0].title.as_deref(), Some("Typo hunt"));
+    let listed = &store.list().unwrap()[0];
+    assert_eq!(
+        (listed.title.as_deref(), listed.pinned),
+        (Some("Typo hunt"), true)
+    );
 
     // Not while a turn runs; then it is gone.
     let msgs = |id: &str| SessionRef {
@@ -2550,9 +2556,9 @@ async fn accepted_queue_changes_report_persistence_failures_without_rejecting() 
     session.lock().unwrap().save_queue().unwrap();
     let fresh = crate::session::SessionStore::new(h._data.path());
     let session = fresh.get(&h.session_id).unwrap();
-    let tmp = path.with_extension("json.tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    // A failed write of an empty queue must not permit eviction of its edits.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    // A failed save of an empty queue must not permit eviction of its edits.
     {
         let mut s = session.lock().unwrap();
         s.queue.clear();
@@ -2564,7 +2570,7 @@ async fn accepted_queue_changes_report_persistence_failures_without_rejecting() 
     }
     let session = fresh.get(&h.session_id).unwrap();
     assert!(session.lock().unwrap().queue.is_empty());
-    std::fs::remove_dir(&tmp).unwrap();
+    std::fs::remove_dir(&path).unwrap();
 }
 
 #[tokio::test]

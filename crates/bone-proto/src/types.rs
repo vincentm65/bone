@@ -127,13 +127,13 @@ pub struct Usage {
     pub context_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub cwd: String,
     /// Unix seconds.
     pub created_at: u64,
-    /// Set with `session/rename`, else the first user message, truncated;
+    /// Set with `session/set`, else the first user message, truncated;
     /// `None` until there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -143,6 +143,12 @@ pub struct SessionInfo {
     /// The session (and tool call) that started this one as a subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<SessionOwner>,
+    /// Listed first (`session/set`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Out of the recent chats (`session/set`) until its next turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 /// Who started a session on its behalf: a tool call in another session.

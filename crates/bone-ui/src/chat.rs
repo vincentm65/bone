@@ -18,8 +18,9 @@ use crate::data::Dep;
 use bone_proto::client::Event;
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, QueueChanged,
-    QueueMode, QueuedMessage, ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams,
-    ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams, TurnStarted, TurnSteered,
+    QueueMode, QueuedMessage, SessionChanged, ToolFinished, ToolFinishedParams, ToolOutput,
+    ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
+    TurnStarted, TurnSteered,
 };
 use bone_proto::types::{
     ChatMessage, DeltaKind, ImageAttachment, SessionInfo, ToolCall, ToolTiming, TurnId,
@@ -1190,6 +1191,7 @@ pub fn apply_event<'a, L: 'a>(
         p.source.clone()
     ));
     on!(TurnFinished, |c, p| c.turn_finished(&p));
+    on!(SessionChanged, |c, p| c.session = Some(p));
     on!(QueueChanged, |c, p| {
         c.set_queue(p.items, p.paused);
         if let Some(error) = p.error {

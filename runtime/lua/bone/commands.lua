@@ -365,7 +365,7 @@ cmd("rename", function(c)
   if c.args == "" then
     return bone.notify("usage: /rename title", "error")
   end
-  bone.request("session/rename", { session_id = id, title = c.args }, function(info, err)
+  bone.request("session/set", { session_id = id, title = c.args }, function(info, err)
     if err then
       return bone.notify("rename failed: " .. tostring(err), "error")
     end

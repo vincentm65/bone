@@ -2,8 +2,9 @@
   {
     "id": 26,
     "jsonrpc": "2.0",
-    "method": "session/rename",
+    "method": "session/set",
     "params": {
+      "pinned": true,
       "session_id": "01a0fe5e-0000-7000-8000-000000000001",
       "title": "Typo hunt"
     }
@@ -14,6 +15,7 @@
     "result": {
       "created_at": 1790000000,
       "cwd": "/home/me/project",
+      "pinned": true,
       "session_id": "01a0fe5e-0000-7000-8000-000000000001",
       "title": "Typo hunt"
     }

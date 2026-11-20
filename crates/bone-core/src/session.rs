@@ -1,12 +1,12 @@
 //! Sessions: transcripts kept in memory and appended to JSONL files.
 //!
 //! File layout: `<data_dir>/sessions/<session_id>.jsonl`, plus
-//! `<session_id>.title` when it was renamed and `<session_id>.queue.json`
-//! for its queue and message ID counter. The first record is
-//! the session header; every later record is one transcript message, a
-//! summary the model gets in place of the transcript's older part (see
-//! `compact.rs`), or a checkpoint that replaces the transcript before it
-//! (`bone.session.compact`; the earlier records stay in the file).
+//! `<session_id>.queue.json` while messages wait in its queue. The first
+//! record is the session header; every later record is one transcript
+//! message, a summary the model gets in place of the transcript's older part
+//! (see `compact.rs`), a checkpoint that replaces the transcript before it
+//! (`bone.session.compact`; the earlier records stay in the file), or what
+//! changed about the session (its model, folder, title, pinned, archived).
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -29,7 +29,7 @@ const TITLE_CHARS: usize = 80;
 /// dropped, to load again from disk when next asked for.
 const MAX_LOADED: usize = 4;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub(crate) enum Record {
     Session(Header),
@@ -45,6 +45,10 @@ pub(crate) enum Record {
     Model(Pin),
     /// The working directory from here on (`session/cd`).
     Cwd(String),
+    /// What `session/set` changed: its title, pinned, archived.
+    Title(String),
+    Pinned(bool),
+    Archived(bool),
 }
 
 /// A provider entry (`None`: the env-configured one) and model.
@@ -100,7 +104,7 @@ pub struct Summary {
     pub text: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Header {
     pub session_id: SessionId,
     pub cwd: String,
@@ -154,7 +158,6 @@ pub struct Session {
     /// Where the working directory changed, in transcript order.
     moves: Vec<Move>,
     next_turn: TurnId,
-    next_queue: u64,
     file: File,
     path: PathBuf,
     index: Option<Arc<Index>>,
@@ -182,11 +185,15 @@ fn moved(moves: &mut Vec<Move>, at: usize, from: &str, to: String) {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct SavedQueue {
-    items: Vec<QueuedMessage>,
-    #[serde(default)]
-    next_id: u64,
+/// The last queued message id given out.
+static QUEUE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// An id for a queued message, past the last one and the clock (in
+/// microseconds): none is given out twice, across restarts too.
+fn queue_id() -> u64 {
+    let clock = SystemTime::now().duration_since(UNIX_EPOCH);
+    QUEUE_ID.fetch_max(clock.map_or(0, |d| d.as_micros() as u64), Ordering::Relaxed);
+    QUEUE_ID.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub struct ActiveTurn {
@@ -244,12 +251,33 @@ impl Session {
         write_record(&mut self.file, Record::Model(model))
     }
 
+    /// Change its title, pinned or archived (`None` keeps one): a record for
+    /// each that changes. Whether any did.
+    pub fn set(
+        &mut self,
+        title: Option<&str>,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> std::io::Result<bool> {
+        let mut records = Vec::new();
+        if let Some(t) = title.filter(|t| self.info.title.as_deref() != Some(t)) {
+            records.push(Record::Title(t.to_owned()));
+        }
+        records.extend((pinned.filter(|&p| p != self.info.pinned)).map(Record::Pinned));
+        records.extend((archived.filter(|&a| a != self.info.archived)).map(Record::Archived));
+        for r in &records {
+            write_record(&mut self.file, r.clone())?;
+            apply(&mut self.info, r);
+        }
+        self.reindex();
+        Ok(!records.is_empty())
+    }
+
     /// Move to `cwd` (nothing moves if the file write fails): tools run there
-    /// from the next turn on. Also kept beside the file, best effort, for listings.
+    /// from the next turn on.
     pub fn cd(&mut self, cwd: String) -> std::io::Result<()> {
         write_record(&mut self.file, Record::Cwd(cwd.clone()))?;
         self.file.sync_data()?;
-        let _ = std::fs::write(self.path.with_extension("cwd"), &cwd);
         moved(
             &mut self.moves,
             self.messages.len(),
@@ -264,7 +292,7 @@ impl Session {
     /// Bring the index up to date with the file.
     fn reindex(&self) {
         if let Some(index) = &self.index
-            && let Err(e) = index.sync(&self.info.session_id, &self.path, None)
+            && let Err(e) = index.sync(&self.info.session_id, &self.path)
         {
             eprintln!("bone: session index: {e}");
         }
@@ -278,8 +306,7 @@ impl Session {
         images: Vec<bone_proto::types::ImageAttachment>,
         source: Option<String>,
     ) -> u64 {
-        self.next_queue += 1;
-        let id = self.next_queue;
+        let id = queue_id();
         self.queue.push(QueuedMessage {
             id,
             text,
@@ -304,21 +331,24 @@ impl Session {
         self.queue.iter().any(|q| q.mode == QueueMode::Steer)
     }
 
-    /// Keep the queue and its ID counter on disk, even when empty.
+    /// Keep the queue on disk; an empty one is no file.
     pub fn save_queue(&self) -> std::io::Result<()> {
         self.queue_dirty.set(true);
-        let saved = SavedQueue {
-            items: self.queue.clone(),
-            next_id: self.next_queue,
-        };
-        let tmp = self.queue_path.with_extension("json.tmp");
-        let text = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
-        // Flushed before the rename, or a crash can leave an empty file in
-        // place of the old queue.
-        let mut f = File::create(&tmp)?;
-        f.write_all(&text)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &self.queue_path)?;
+        if self.queue.is_empty() {
+            match std::fs::remove_file(&self.queue_path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        } else {
+            let tmp = self.queue_path.with_extension("json.tmp");
+            let text = serde_json::to_vec(&self.queue).map_err(std::io::Error::other)?;
+            // Flushed before the rename, or a crash can leave an empty file in
+            // place of the old queue.
+            let mut f = File::create(&tmp)?;
+            f.write_all(&text)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.queue_path)?;
+        }
         self.queue_dirty.set(false);
         Ok(())
     }
@@ -407,8 +437,6 @@ pub struct SessionStore {
     tick: AtomicU64,
     /// Held while a session loads from disk, so loads go one at a time.
     loading: Mutex<()>,
-    /// What `list` read from files not loaded, by their modification time.
-    listed: Mutex<HashMap<SessionId, (SystemTime, SessionInfo)>>,
     /// `None` when the index could not be opened; sessions work without.
     index: Option<Arc<Index>>,
     /// Usage of model calls outside any session.
@@ -440,7 +468,6 @@ impl SessionStore {
             loaded: Mutex::new(HashMap::new()),
             tick: Default::default(),
             loading: Mutex::new(()),
-            listed: Mutex::new(HashMap::new()),
             index,
             usage_log: data_dir.join("usage.jsonl"),
             usage_lock: Mutex::new(()),
@@ -480,6 +507,7 @@ impl SessionStore {
             title: messages.iter().find_map(title_of),
             parent: header.parent.clone(),
             owner: header.owner.clone(),
+            ..Default::default()
         };
         write_record(&mut file, Record::Session(header))?;
         for m in messages {
@@ -519,7 +547,7 @@ impl SessionStore {
         }
         let path = self.path(id);
         let Loaded {
-            mut info,
+            info,
             messages,
             summary,
             good_len,
@@ -538,9 +566,6 @@ impl SessionStore {
         // Drop a torn tail so the next append starts on a fresh line.
         if file.metadata()?.len() > good_len {
             file.set_len(good_len)?;
-        }
-        if let Some(t) = self.saved(id, "title") {
-            info.title = Some(t);
         }
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
@@ -571,18 +596,18 @@ impl SessionStore {
     ) -> SessionHandle {
         let path = self.path(&info.session_id);
         let queue_path = self.queue_path(&info.session_id);
-        let saved = std::fs::read_to_string(&queue_path)
+        let saved: Vec<QueuedMessage> = std::fs::read_to_string(&queue_path)
             .ok()
-            .and_then(|t| serde_json::from_str::<SavedQueue>(&t).ok())
+            .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        let next_queue = saved
-            .next_id
-            .max(saved.items.iter().map(|q| q.id).max().unwrap_or(0));
+        // A clock set back must not give out an id still waiting here.
+        let last = saved.iter().map(|q| q.id).max().unwrap_or(0);
+        QUEUE_ID.fetch_max(last, Ordering::Relaxed);
         Arc::new(Mutex::new(Session {
             queue_path,
             queue_dirty: Cell::new(false),
-            queue_paused: !saved.items.is_empty(),
-            queue: saved.items,
+            queue_paused: !saved.is_empty(),
+            queue: saved,
             turn_rt: None,
             info,
             messages,
@@ -600,7 +625,6 @@ impl SessionStore {
             client: None,
             moves: Vec::new(),
             next_turn: users as TurnId,
-            next_queue,
             file,
             path,
             index: self.index.clone(),
@@ -637,26 +661,11 @@ impl SessionStore {
         session
     }
 
-    /// Give a session a title that stays (kept next to its file).
-    pub fn rename(&self, id: &str, title: &str) -> Result<SessionInfo, SessionError> {
-        let session = self.get(id)?;
-        std::fs::write(self.title_path(id), title)?;
-        if let Some(index) = &self.index {
-            let _ = index.rename(id, title);
-        }
-        let mut s = session.lock().unwrap();
-        s.info.title = Some(title.to_owned());
-        Ok(s.info.clone())
-    }
-
     /// Remove a session from memory and disk.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
         self.get(id)?;
         self.loaded.lock().unwrap().remove(id);
-        self.listed.lock().unwrap().remove(id);
         std::fs::remove_file(self.path(id))?;
-        let _ = std::fs::remove_file(self.title_path(id));
-        let _ = std::fs::remove_file(self.path(id).with_extension("cwd"));
         let _ = std::fs::remove_file(self.queue_path(id));
         if let Some(index) = &self.index {
             let _ = index.remove(id);
@@ -682,7 +691,7 @@ impl SessionStore {
             .and_then(|mut f| write_record(&mut f, Record::Usage(usage)));
         if written.is_ok()
             && let Some(index) = &self.index
-            && let Err(e) = index.sync("", &self.usage_log, None)
+            && let Err(e) = index.sync("", &self.usage_log)
         {
             eprintln!("bone: session index: {e}");
         }
@@ -693,52 +702,40 @@ impl SessionStore {
     }
 
     /// Bring the index up to date with every session file (new, grown,
-    /// rewritten or gone). Cheap for files already indexed.
-    pub fn catch_up(&self) {
+    /// rewritten or gone). Cheap for files already indexed. Whether it
+    /// indexed anything new.
+    pub fn catch_up(&self) -> bool {
         let Some(index) = &self.index else {
-            return;
+            return false;
         };
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return;
-        };
-        let mut ids = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
-                continue;
+        let files = self.files();
+        let mut grew = false;
+        for (id, path) in &files {
+            match index.sync(id, path) {
+                Ok(g) => grew |= g,
+                Err(e) => eprintln!("bone: session index: {id}: {e}"),
             }
-            let id = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let title = self.saved(&id, "title");
-            if let Err(e) = index.sync(&id, &path, title.as_deref()) {
-                eprintln!("bone: session index: {id}: {e}");
-            }
-            ids.push(id);
         }
+        let ids: Vec<String> = files.into_iter().map(|(id, _)| id).collect();
         let _ = index.retain(&ids);
         if self.usage_log.exists() {
             let _guard = self.usage_lock.lock().unwrap();
-            let _ = index.sync("", &self.usage_log, None);
+            let _ = index.sync("", &self.usage_log);
         }
+        grew
+    }
+
+    /// Every session file, by id.
+    fn files(&self) -> Vec<(SessionId, PathBuf)> {
+        let entries = std::fs::read_dir(&self.dir).into_iter().flatten().flatten();
+        (entries.map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .filter_map(|p| Some((p.file_stem()?.to_str()?.to_owned(), p)))
+            .collect()
     }
 
     fn queue_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.queue.json"))
-    }
-
-    fn title_path(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{id}.title"))
-    }
-
-    /// What is kept beside a session's file, if anything: the title a
-    /// rename gave (`title`), where `session/cd` last moved it (`cwd`).
-    fn saved(&self, id: &str, ext: &str) -> Option<String> {
-        std::fs::read_to_string(self.dir.join(format!("{id}.{ext}")))
-            .ok()
-            .filter(|t| !t.trim().is_empty())
     }
 
     /// Running sessions are always held in memory; no disk reads are needed.
@@ -755,45 +752,19 @@ impl SessionStore {
             .filter_map(|(id, session)| session.lock().unwrap().active.is_some().then_some(id))
             .collect()
     }
-    /// Every session on disk, newest first. Unreadable files are skipped.
+    /// Every session on disk, newest first: as held in memory, else as
+    /// indexed, else (not indexed yet, or no index) from the start of its
+    /// file. Unreadable files are skipped.
     pub fn list(&self) -> Result<Vec<SessionInfo>, SessionError> {
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
         let loaded = self.loaded.lock().unwrap().clone();
-        let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
-                continue;
-            }
-            let id = path.file_stem().unwrap_or_default().to_string_lossy();
-            if let Some((s, _)) = loaded.get(id.as_ref()) {
-                out.push(s.lock().unwrap().info.clone());
-                continue;
-            }
-            // Only files changed since the last list are read again.
-            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            let mut listed = self.listed.lock().unwrap();
-            let cached = listed.get(id.as_ref()).filter(|(t, _)| *t == mtime);
-            let Some(mut info) = (cached.map(|(_, i)| i.clone()))
-                .or_else(|| read_file(&path, 1).ok().map(|l| l.info))
-            else {
-                continue;
-            };
-            listed.insert(id.to_string(), (mtime, info.clone()));
-            if let Some(t) = self.saved(&id, "title") {
-                info.title = Some(t);
-            }
-            // A session that moved says where to beside its file: only the
-            // file's start was read.
-            info.cwd = self.saved(&id, "cwd").unwrap_or(info.cwd);
-            out.push(info);
-        }
+        let index = self.index.as_ref();
+        let mut indexed = index.and_then(|i| i.sessions().ok()).unwrap_or_default();
+        let mut out: Vec<SessionInfo> = (self.files().into_iter())
+            .filter_map(|(id, path)| match loaded.get(&id) {
+                Some((s, _)) => Some(s.lock().unwrap().info.clone()),
+                None => (indexed.remove(&id)).or_else(|| read_file(&path, 1).ok().map(|l| l.info)),
+            })
+            .collect();
         // UUIDv7 ids sort by creation time.
         out.sort_by(|a, b| b.session_id.cmp(&a.session_id));
         Ok(out)
@@ -839,6 +810,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             title: None,
             parent: header.parent,
             owner: header.owner,
+            ..Default::default()
         },
         messages: Vec::new(),
         summary: None,
@@ -857,10 +829,13 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         if reader.read_until(b'\n', &mut buf)? == 0 || buf.last() != Some(&b'\n') {
             break;
         }
-        let len = buf.len() as u64;
+        loaded.good_len += buf.len() as u64;
         let line = String::from_utf8_lossy(&buf);
         match serde_json::from_str::<Record>(&line) {
-            Ok(Record::Usage(_)) => loaded.good_len += len,
+            Ok(Record::Usage(_)) => {}
+            Ok(r @ (Record::Title(_) | Record::Pinned(_) | Record::Archived(_))) => {
+                apply(&mut loaded.info, &r)
+            }
             Ok(Record::Message(msg)) => {
                 if loaded.info.title.is_none() {
                     loaded.info.title = title_of(&msg);
@@ -873,7 +848,6 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                     loaded.tool_times.insert(call_id.clone(), t);
                 }
                 loaded.messages.push(msg);
-                loaded.good_len += len;
                 if is_user {
                     loaded.users += 1;
                     if loaded.users >= max_user {
@@ -885,29 +859,20 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                 loaded.messages = messages;
                 loaded.summary = None;
                 loaded.moves.clear();
-                loaded.good_len += len;
             }
             Ok(Record::Cwd(cwd)) => {
                 let at = loaded.messages.len();
                 moved(&mut loaded.moves, at, &loaded.info.cwd, cwd.clone());
                 loaded.info.cwd = cwd;
-                loaded.good_len += len;
             }
-            Ok(Record::Summary(summary)) => {
-                loaded.summary = summary;
-                loaded.good_len += len;
-            }
-            Ok(Record::Model(model)) => {
-                loaded.model = Some(model);
-                loaded.good_len += len;
-            }
+            Ok(Record::Summary(summary)) => loaded.summary = summary,
+            Ok(Record::Model(model)) => loaded.model = Some(model),
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),
             // Nor should one damaged line in the middle: skip it and keep
             // the rest. The file is left as it is; tool calls it leaves
             // unanswered are closed before the model sees them.
             Err(e) => {
                 eprintln!("bone: {}: skipped damaged line {n}: {e}", path.display());
-                loaded.good_len += len;
                 // It may have been a user message: count it, since a gap in
                 // turn ids is harmless and a repeat is not.
                 loaded.users += 1;
@@ -915,6 +880,16 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         }
     }
     Ok(loaded)
+}
+
+/// What a `session/set` record says about the session.
+fn apply(info: &mut SessionInfo, record: &Record) {
+    match record {
+        Record::Title(t) => info.title = Some(t.clone()),
+        Record::Pinned(p) => info.pinned = *p,
+        Record::Archived(a) => info.archived = *a,
+        _ => {}
+    }
 }
 
 fn now() -> u64 {
@@ -1302,7 +1277,7 @@ mod tests {
             })
             .unwrap();
         }
-        store.rename(&id, "Walrus hunt").unwrap();
+        (s.lock().unwrap().set(Some("Walrus hunt"), Some(true), None)).unwrap();
         let summary = "SELECT coalesce(renamed, title), messages FROM sessions";
         let tools = "SELECT name, is_error FROM tool_calls ORDER BY name";
         let usage = "SELECT model, input_tokens, output_tokens FROM usage";
@@ -1467,38 +1442,5 @@ mod tests {
                 "append {n} was cut off the file"
             );
         }
-    }
-
-    #[test]
-    fn list_reads_a_file_again_once_it_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path());
-        let id = store
-            .create("/w".into())
-            .unwrap()
-            .lock()
-            .unwrap()
-            .info
-            .session_id
-            .clone();
-        // Not loaded, so `list` reads (and caches) the file.
-        store.loaded.lock().unwrap().clear();
-        assert_eq!(store.list().unwrap()[0].title, None);
-        let mut f = OpenOptions::new()
-            .append(true)
-            .open(store.path(&id))
-            .unwrap();
-        write_record(
-            &mut f,
-            Record::Message(ChatMessage::User {
-                content: "a title".into(),
-                images: Vec::new(),
-                source: None,
-            }),
-        )
-        .unwrap();
-        let later = SystemTime::now() + std::time::Duration::from_secs(5);
-        f.set_modified(later).unwrap();
-        assert_eq!(store.list().unwrap()[0].title.as_deref(), Some("a title"));
     }
 }

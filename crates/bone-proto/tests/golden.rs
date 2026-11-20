@@ -117,8 +117,7 @@ fn info() -> SessionInfo {
         cwd: "/home/me/project".into(),
         created_at: 1_790_000_000,
         title: Some("Fix the typo in main.rs".into()),
-        parent: None,
-        owner: None,
+        ..Default::default()
     }
 }
 
@@ -454,14 +453,17 @@ fn requests() {
             reason: "manual".into(),
         },
     );
-    exchange::<SessionRename>(
+    exchange::<SessionSet>(
         26,
-        SessionRenameParams {
+        SessionSetParams {
             session_id: SID.into(),
-            title: "Typo hunt".into(),
+            title: Some("Typo hunt".into()),
+            pinned: Some(true),
+            ..Default::default()
         },
         SessionInfo {
             title: Some("Typo hunt".into()),
+            pinned: true,
             ..info()
         },
     );
@@ -788,6 +790,10 @@ fn events() {
     });
     event::<SessionDeleted>(SessionRef {
         session_id: SID.into(),
+    });
+    event::<SessionChanged>(SessionInfo {
+        archived: true,
+        ..info()
     });
     event::<SessionUpdated>(SessionUpdatedParams {
         session_id: SID.into(),
