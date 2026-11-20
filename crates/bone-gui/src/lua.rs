@@ -40,7 +40,6 @@ pub struct LuaSide {
     pub owner: Option<String>,
     pub callback_owner: HashMap<u64, String>,
     pub owned: HashMap<String, Vec<Owned>>,
-    pub next_callback: u64,
     pub options: Options,
     pub dynamic_options: HashMap<String, DynamicOption>,
     pub carried_options: HashMap<String, DynamicValue>,
@@ -74,6 +73,7 @@ pub struct LuaSide {
     /// The known plugins and their shutdown hooks.
     pub plugins: Vec<bone_ui::lua::plugins::Plugin>,
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
+    pub carry_hooks: Vec<bone_ui::lua::handover::CarryHook>,
     /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
@@ -125,11 +125,20 @@ impl Gui {
     }
 
     /// Load the configuration again (after its files changed) into a fresh
-    /// state while the current one waits. The new one is taken only if it
-    /// loaded without an error the current one did not also have; otherwise
-    /// the current one stays and the error is shown. Option values carry
-    /// over; the chats, prompt and session are Rust's and stay.
+    /// state while the current one waits, as the TUI does: plugin state is
+    /// saved first, `ready` gets `{ reload = true, panels }`, and what the
+    /// old state hands over (`bone.plugin.carry`, `bone.job.adopt`) reaches
+    /// the new one in memory. The new one is taken only if it loaded
+    /// without an error the current one did not also have; otherwise the
+    /// current one stays and the error is shown. When it is taken, the old
+    /// state's shutdown hooks run on it, and it goes with the jobs nothing
+    /// took over. Option values carry over; the chats, prompt and session
+    /// are Rust's and stay.
     pub fn reload_lua(&mut self) -> bool {
+        // The new state reads plugin state from disk, so write it first.
+        bone_ui::lua::plugins::save_plugin_states(self, None);
+        bone_ui::lua::handover::collect(self);
+        let panels: Vec<String> = self.lua.panels.iter().map(|p| p.id.clone()).collect();
         let carried = (self.lua.dynamic_options.iter())
             .map(|(name, o)| (name.clone(), o.value.clone()))
             .collect();
@@ -141,11 +150,15 @@ impl Gui {
         self.lua.carried_options = carried;
         self.lua.log = old.log.clone();
         self.lua.load_errors = Some(Vec::new());
+        self.reload_panels = Some(panels);
         self.load_lua_files();
+        self.reload_panels = None;
         let errors = self.lua.load_errors.take().unwrap_or_default();
         if let Some(new) = errors.iter().find(|e| !old.load_failures.contains(*e)) {
             let new = new.lines().next().unwrap_or_default().to_owned();
             let mut rejected = std::mem::replace(&mut self.lua, old);
+            bone_ui::lua::handover::reject(self);
+            bone_ui::lua::handover::finish(self);
             rejected.jobs.cancel_all();
             self.lua.log = rejected.log;
             self.lua.views_rev += 1;
@@ -157,9 +170,27 @@ impl Gui {
             return false;
         }
         self.lua.load_failures = errors.into_iter().collect();
-        // The old state's jobs go with it.
+        // The jobs the new state took over (bone.job.adopt) move to it
+        // before the old state's shutdown hooks could stop them.
         let mut old = old;
+        bone_ui::lua::handover::accept(self, &mut old.jobs);
+        bone_ui::lua::handover::finish(self);
+        let focus = old.panel_focus.clone();
+        // The old state's shutdown hooks run on it, with its own view
+        // functions bound, just before it goes.
+        let new_bound = std::mem::replace(&mut self.view.bound, bound);
+        let new = std::mem::replace(&mut self.lua, old);
+        bone_ui::lua::plugins::run_shutdown(self, None);
+        let mut old = std::mem::replace(&mut self.lua, new);
+        drop(std::mem::replace(&mut self.view.bound, new_bound));
+        // Its other jobs go with it.
         old.jobs.cancel_all();
+        // The keyboard stays where it was: the prompt, or a panel the new
+        // state opened again.
+        if focus.is_none() || self.lua.panels.iter().any(|p| Some(&p.id) == focus.as_ref()) {
+            self.lua.panel_focus = focus;
+        }
+        self.lua.views_rev += 1;
         Gui::info(self, "Lua configuration reloaded".into());
         true
     }
@@ -199,7 +230,12 @@ impl Gui {
             self.load_user_files(dir, bare);
         }
         self.apply_gui_settings(None);
-        bone_ui::lua::fire(self, "ready", Json::Null);
+        // After a reload, as in the TUI: which panels were open.
+        let ready = match &self.reload_panels {
+            Some(panels) => serde_json::json!({ "reload": true, "panels": panels }),
+            None => Json::Null,
+        };
+        bone_ui::lua::fire(self, "ready", ready);
     }
 
     /// Apply the GUI's saved options (settings.json `gui.<name>`, what
@@ -369,7 +405,7 @@ impl Host for Gui {
             owner: &mut l.owner,
             callback_owner: &mut l.callback_owner,
             owned: &mut l.owned,
-            next_callback: &mut l.next_callback,
+            next_callback: &mut self.next_callback,
         }
     }
 
@@ -673,6 +709,10 @@ impl Host for Gui {
         &mut self.lua.jobs
     }
 
+    fn handover(&mut self) -> &mut bone_ui::lua::handover::Handover {
+        &mut self.handover
+    }
+
     fn job_sink(&self) -> bone_ui::jobs::Sink {
         let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
         std::sync::Arc::new(move |id, ev| {
@@ -760,6 +800,7 @@ impl Host for Gui {
         bone_ui::lua::plugins::PluginStore {
             plugins: &mut l.plugins,
             shutdown_hooks: &mut l.shutdown_hooks,
+            carry_hooks: &mut l.carry_hooks,
         }
     }
 

@@ -14,6 +14,7 @@ use bone_proto::methods::ProcessSnapshot;
 use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
+pub mod handover;
 pub mod input;
 pub mod jobs;
 pub mod libraries;
@@ -295,6 +296,8 @@ pub trait Host {
     /// Where job tasks report: each event is to reach `jobs::event` on the
     /// UI thread.
     fn job_sink(&self) -> crate::jobs::Sink;
+    /// What a reload in progress hands over (see `handover`).
+    fn handover(&mut self) -> &mut handover::Handover;
     /// The width of the whole window, in columns.
     fn screen_cols(&self) -> u16;
     /// Chat `buf`'s prompt has the keyboard (it is on screen and no popup
@@ -483,7 +486,8 @@ pub fn dispatch<H: Host>(
                 .or_else(|a| processes::dispatch(h, lua, op, a))
                 .or_else(|a| jobs::dispatch(h, lua, op, a))
                 .or_else(|a| libraries::dispatch(h, lua, op, a))
-                .or_else(|a| plugins::dispatch(h, lua, op, a));
+                .or_else(|a| plugins::dispatch(h, lua, op, a))
+                .or_else(|a| handover::dispatch(h, lua, op, a));
         }
     })
 }

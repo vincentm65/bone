@@ -71,10 +71,11 @@ pub(crate) struct LuaSide {
     keymap_owner: HashMap<(Context, Vec<Key>), String>,
     plugins: Vec<crate::plugins::Plugin>,
     shutdown_hooks: Vec<(Option<String>, u64)>,
+    carry_hooks: Vec<bone_ui::lua::handover::CarryHook>,
     popups: Vec<Popup>,
     panels: Vec<Panel>,
-    panel_focus: Option<String>,
-    jobs: bone_ui::jobs::Jobs,
+    pub(crate) panel_focus: Option<String>,
+    pub(crate) jobs: bone_ui::jobs::Jobs,
     theme: Theme,
     colors_name: Option<String>,
     ui_broken: HashSet<String>,
@@ -178,6 +179,10 @@ pub struct App {
     pub plugins: Vec<crate::plugins::Plugin>,
     /// `bone.plugin.on_shutdown` callbacks, by owner.
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
+    /// `bone.plugin.carry` functions.
+    pub carry_hooks: Vec<bone_ui::lua::handover::CarryHook>,
+    /// What a reload in progress hands from the old Lua state to the new.
+    pub handover: bone_ui::lua::handover::Handover,
     /// The saved settings (settings.json, via the core), kept current by
     /// `settings/changed`.
     pub settings: serde_json::Value,
@@ -275,6 +280,8 @@ impl App {
             keymap_owner: HashMap::new(),
             plugins: Vec::new(),
             shutdown_hooks: Vec::new(),
+            carry_hooks: Vec::new(),
+            handover: Default::default(),
             carried_options: HashMap::new(),
             lua_errors: Vec::new(),
             settings: serde_json::Value::Null,
@@ -310,6 +317,7 @@ impl App {
         swap(&mut self.keymap_owner, &mut side.keymap_owner);
         swap(&mut self.plugins, &mut side.plugins);
         swap(&mut self.shutdown_hooks, &mut side.shutdown_hooks);
+        swap(&mut self.carry_hooks, &mut side.carry_hooks);
         swap(&mut self.popups, &mut side.popups);
         swap(&mut self.panels, &mut side.panels);
         swap(&mut self.panel_focus, &mut side.panel_focus);

@@ -35,11 +35,11 @@ files are watched regardless of side, but a GUI reload still reloads only
 GUI Lua. Changes made while autoreload is off are not picked up just by
 turning it back on; a subsequent watched change triggers a reload.
 
-Unlike TUI file reloads, GUI file reloads currently do not run outgoing
-shutdown hooks or save plugin state. Explicit plugin unload/reload and
-window close do. Save important state as it changes with
-`bone.plugin.save_state()`. GUI `ready` has no data at startup or after
-reload; do not expect the TUI's `{ reload = true, panels }` payload.
+As in the TUI, plugin state is saved before the new state loads, `ready`
+gets `{ reload = true, panels }`, the outgoing state's shutdown hooks run
+once the new one is taken, and what plugins hand over with
+`bone.plugin.carry` and `bone.job.adopt` (terminals, the windows layout)
+carries over in memory; see [Reloading](../lua.md#reloading-1).
 
 ## Libraries
 

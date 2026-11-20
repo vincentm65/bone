@@ -401,6 +401,17 @@ bone.job = {
   list = function()
     return api("job_list")
   end,
+  --- While a Lua reload loads this configuration: take over job `id` that
+  --- the outgoing one started (its id handed over with bone.plugin.carry),
+  --- with new callbacks (on_stdout, on_stderr, on_exit). A terminal keeps
+  --- its program, screen and scrollback. It is moved over when the reload
+  --- is taken; a job that ended by then is not. The handle, or nil outside
+  --- a reload.
+  adopt = function(id, opts)
+    if api("job_adopt", id, opts or {}) then
+      return job_handle(id)
+    end
+  end,
   --- Cancel every running job.
   cancel_all = function()
     for _, s in ipairs(api("job_list")) do
@@ -1295,6 +1306,25 @@ bone.plugin = {
   on_shutdown = function(fn)
     assert(type(fn) == "function", "bone.plugin.on_shutdown(fn)")
     api("plugin_on_shutdown", fn)
+  end,
+  --- At a Lua reload, fn() runs on the outgoing configuration and what it
+  --- returns (plain data: tables, strings, numbers, booleans) is handed to
+  --- the incoming one in memory, for bone.plugin.carried(). Not when this
+  --- plugin's own Lua files changed since it loaded: then it starts fresh.
+  --- The runtime and your config always hand theirs over. `key` (default
+  --- "") tells several apart; carrying again under a key replaces it.
+  carry = function(key, fn)
+    if fn == nil then
+      key, fn = "", key
+    end
+    assert(type(key) == "string" and type(fn) == "function", "bone.plugin.carry([key,] fn)")
+    api("plugin_carry", key, fn)
+  end,
+  --- What the outgoing configuration's carry function handed over, while a
+  --- reload loads this one (at load and in `ready`); nil at a fresh start,
+  --- after this plugin's files changed, or once the reload is over.
+  carried = function(key)
+    return api("plugin_carried", key or "")
   end,
   --- A table kept in ~/.bone/state/tui/<name>.json (default: the current
   --- plugin's name). Change it freely: it is saved when the plugin

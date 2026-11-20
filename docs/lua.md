@@ -105,7 +105,7 @@ naming the operation.
 | `ui.project` | `bone.project` (`info`, `trust`) | shared |
 | `gui.nodes`, `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.window_nodes` | `bone.gui` (`view`, scroll, window, notify, file dialogs, library), node views, and windows and panels drawn as nodes (`node = fn` in their spec) | GUI only (see `customizing/customizing-gui.md`) |
 
-The TUI and the GUI fire the same local event names, including `server/disconnected` and `server/reconnected` for socket clients. Their reload lifecycle differs: TUI `ready` receives `{ reload = true, panels }` after a file reload, whereas GUI `ready` has no data at startup or after reload. GUI file reloads do not run outgoing shutdown hooks or save plugin state. See [GUI reloading](customizing/customizing-gui.md#reloading) for the watched files and limitations.
+The TUI and the GUI fire the same local event names, including `server/disconnected` and `server/reconnected` for socket clients. Both reload the same way: `ready` receives `{ reload = true, panels }` after a file reload (no data at startup), the outgoing state's shutdown hooks run, and plugin state is saved first. See [GUI reloading](customizing/customizing-gui.md#reloading) for the watched files and limitations.
 
 ### Ownership and compatibility
 
@@ -182,9 +182,10 @@ bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
 - `bone.plugin.list()`: `{ name, dir, kind, loaded, error }` for each plugin seen this session.
 - `bone.plugin.load(name)` (a folder in `plugins/`, even one added after startup or disabled with `_`), `bone.plugin.unload(name)`, `bone.plugin.reload(name)`; also `/plugins load|unload|reload name`. A plugin cannot unload itself from its own code.
 - `bone.plugin.state(name)` returns a table that is loaded once and saved when its plugin unloads and when bone quits; `bone.plugin.save_state(name)` saves it now. `name` defaults to the current plugin.
+- `bone.plugin.carry([key,] fn)` and `bone.plugin.carried([key])`: what a Lua reload hands over in memory (see [Reloading](#reloading-1)).
 - Events: `plugin/loaded` and `plugin/unloaded` with the plugin's info.
 
-Explicit plugin unload/reload and frontend quit run shutdown hooks and save plugin state. TUI file reloads also do this; GUI file reloads currently do neither. Save important changes as they happen with `bone.plugin.save_state()` rather than relying on a GUI reload to persist them.
+Explicit plugin unload/reload, file reloads and frontend quit run shutdown hooks and save plugin state.
 
 ### Project config
 
@@ -563,6 +564,8 @@ The TUI watches the Lua it loads (`ui.lua`, `tui.lua`, `lua/`, `colors/`, `runti
 
 The new state loads while the current one keeps running, and it is taken only if loading it raised no Lua error the current one did not also have (the same file and message; only line numbers may differ). Otherwise the current configuration and the built-in options stay as they were, the error is shown (and listed by `/health`), and the next save tries again; requests the failed load already sent to the core are not undone. When it is taken, the old state's `bone.plugin.on_shutdown` hooks run and it is dropped with everything it made (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors), and replies to its requests are ignored. `bone.plugin.state` tables are saved before the new state loads, so it reads them; what a shutdown hook writes into one during a reload is saved but not seen by the new state, so save plugin state as it changes rather than in `on_shutdown`. Panels do not carry over; `ready` gets `{ reload = true, panels = { … } }`, the ids of the panels that were open, so a plugin can open its panel again.
 
+What a plugin wants to keep across a reload it hands over in memory, never on disk. `bone.plugin.carry([key,] fn)` registers `fn`; at a reload it runs on the outgoing state, and what it returns (plain data: it crosses as JSON, so use lists rather than tables with gaps in their number keys) is `bone.plugin.carried([key])` in the incoming state while it loads and in `ready`, then nil. The runtime and the user's config always hand theirs over; a plugin hands nothing over once its own Lua files (all but `core.lua`) differ from when it loaded, so editing a plugin resets only that plugin. With the ids it was handed, the incoming state takes over running jobs: `bone.job.adopt(id, { on_stdout, on_stderr, on_exit })` claims one, and when the reload is taken it moves over, before the outgoing state's shutdown hooks run, keeping its program, and for a `pty` job its screen and scrollback. A rejected reload leaves the outgoing state its jobs; jobs nothing claimed end with it as before. The catalog's term and windows plugins keep their terminals and layout this way. The keyboard stays where it was: on the prompt, or in a panel the new state opened again.
+
 Files only the core loads, and modules either side can `require`, reload the core too when it runs in the same process (see [Reloading](#reloading); only with the environment overrides that keep the core private). `bone.o.autoreload = false` stops watching.
 
 Every key comes from Lua, with one exception: when `ctrl+c` is not mapped where it is pressed (say, a broken or emptied `runtime/tui/defaults.lua`), or is mapped to a Lua function that errors or returns `false`, it runs the built-in `interrupt`, so bone can always be quit.
@@ -715,7 +718,7 @@ bone.off(id)
 ```
 
 - Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/output`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
-- `ready`: after config and saved options have loaded. At startup it has no data. After a TUI file reload its data is `{ reload = true, panels }` (see [Reloading](#reloading-1)); in the GUI it has no data after reload either.
+- `ready`: after config and saved options have loaded. At startup it has no data. After a file reload its data is `{ reload = true, panels }` (see [Reloading](#reloading-1)).
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 
 
@@ -883,7 +886,7 @@ bone.keymap.set("ctrl+x", function() job:cancel() end)
 - `job:status()` (and each entry of `bone.job.list()`): `{ id, name, cmd, pid, state, running, elapsed_ms, stdout_bytes, stderr_bytes }`, plus `code`, `signal` and `error` once it has ended. `state` is `"running"`, `"exited"`, `"cancelled"`, `"timed_out"` or `"failed"` (it could not start; see `error`).
 - `on_exit` and the `job/finished` event get the status plus `cancelled`, `timed_out`, `duration_ms` and, when buffering, `stdout`, `stderr` and `truncated` (only the last 4 MiB of each stream are kept).
 - `pty = { width, height }` (or `true` for 80×24; Unix only) runs the job in a pseudo-terminal that is also its controlling terminal, with `TERM=xterm-256color`. Its output plays into a screen instead of reaching `on_stdout` (unless one is given), and `job:write` types into it. `job:screen({ width, height, scroll })` resizes the terminal to that size and gives `{ lines, scroll, max }` as `bone.processes.screen` does, plus `cursor` (`{ row, col }` from 1, or nil when hidden or scrolled back), `title`, `app_cursor`, `bracketed_paste`, `alt_screen` and `running`. The optional **term** catalog plugin supplies `require("bone.ui.terminal")`, which builds terminal panels on it (`/term`, `ctrl+]`).
-- `bone.job.list()` has running jobs and the last 32 finished ones; `bone.job.get(id)` returns a handle; `bone.job.cancel_all()`. `job:running()` is a shortcut. The statusline context's `jobs` is the number running.
+- `bone.job.list()` has running jobs and the last 32 finished ones; `bone.job.get(id)` returns a handle; `bone.job.cancel_all()`; `bone.job.adopt(id, opts)` takes over a job across a reload (see [Reloading](#reloading-1)). `job:running()` is a shortcut. The statusline context's `jobs` is the number running.
 
 Core-managed shell processes are separate from plugin jobs. The TUI exposes
 `bone.processes.list()`, `bone.processes.refresh()` and
