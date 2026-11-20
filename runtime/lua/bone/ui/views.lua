@@ -320,6 +320,9 @@ local function split_exit_code(text)
   return body, tonumber(code)
 end
 
+-- Background shell jobs: the call that started one shows it, live.
+local jobs = require("bone.jobs")
+
 -- Stored legacy read_file rows are "LINE#HASH|text".
 local function anchored(l)
   local n, text = l:match("^(%d+)#%w%w|(.*)$")
@@ -528,34 +531,69 @@ local function shell_label(args)
   return #out > 0 and out or { { { "shell", "ToolName" } } }
 end
 
--- A delegated task is a small report, with its own hierarchy and Markdown.
--- Keep the preview inside the same gutter as the expanded report so it
--- cannot be mistaken for the main assistant's answer.
+-- A delegated task is one row: what it does, then its name, model, step,
+-- tokens and time, live while it works. Collapsed (summary) that is all;
+-- otherwise its report follows, with its own hierarchy and Markdown, in a
+-- gutter so it cannot be mistaken for the main assistant's answer.
 local function agent_content(item, ctx, args)
-  local name = type(args.name) == "string" and trim(args.name) or ""
-  if name == "" then name = "subagent" end
+  local a, state = require("bone.agents").call_state(item)
+  local name = a and a.name or (type(args.name) == "string" and trim(args.name)) or ""
+  if name == "" then name = "agent" end
   local task = type(args.task) == "string" and trim(args.task):gsub("%s+", " ") or ""
-  local title = { { task ~= "" and task or name, "Accent" } }
-  if task ~= "" then
-    title[#title + 1] = { " · " .. name, "Dim" }
+  if task == "" then task = name end
+  local usage = a and require("bone.usage").of(a.id)
+  -- Its model and totals load on first use; draw again once they are in.
+  if usage and not usage.model then bone.chat.refresh_in(1000) end
+  -- An agent from before a restart has no clock of this run: its report's
+  -- fetch says how long it took.
+  if a and not a.started_at and state ~= "running" then require("bone.agents").report(a) end
+  local parts = {}
+  local function part(text, group) parts[#parts + 1] = { " · " .. text, group or "Dim" } end
+  if task ~= name then part(name) end
+  if usage and usage.model then part(usage.model) end
+  if state == "running" and a and a.step then part(a.step) end
+  local tokens = math.max(usage and (usage.input or 0) + (usage.output or 0) or 0,
+    a and a.tokens + (a.extra_tokens or 0) or 0)
+  if tokens > 0 then part(bone.util.tokens(tokens) .. " tok") end
+  -- The agent's own clock; a call that waited for its agent (older chats)
+  -- took as long as it did.
+  local ms
+  if a and a.started_at then
+    ms = (state == "running" and bone.now() or a.finished_at or bone.now()) - a.started_at
+  elseif not item.done and item.started_at then
+    ms = bone.now() - item.started_at
+  elseif a and a.took_ms then
+    ms = a.took_ms
+  elseif item.duration_ms and item.duration_ms >= 1000 then
+    ms = item.duration_ms
   end
-  local status = not item.done and "running" or item.is_error and "failed" or "done"
-  title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
-  -- Prefer persisted tool timing: the agent record is only in memory.
-  local agent = require("bone.agents").for_call(item.id)
-  local start = item.started_at or (agent and agent.started_at)
-  local ms = item.duration_ms or (not item.done and start and bone.now() - start)
-    or (agent and agent.started_at and agent.finished_at and agent.finished_at - agent.started_at)
-  local stats = ms and bone.util.duration(math.max(ms, 0) / 1000)
-  if agent and agent.tokens > 0 then
-    stats = bone.util.tokens(agent.tokens) .. " tok" .. (stats and (" · " .. stats) or "")
+  if ms then part(bone.util.duration(math.max(ms, 0) / 1000)) end
+  if state == "failed" then
+    local why = a and a.status == "cancelled" and "stopped" or "failed"
+    if not a and item.is_error then why = why .. ": " .. (trim(item.output or ""):match("^[^\n]*") or "") end
+    part(why, "ToolError")
   end
-  if stats then title[#title + 1] = { " · " .. stats, "Dim" } end
-  if not item.done then bone.chat.refresh_in(1000) end
+  if state == "running" then bone.chat.refresh_in(1000) end
 
-  local report = bone.ui.markdown(trim(item.output or item.live or ""), math.max(ctx.width - 8, 1))
-  local shown = (expanded(ctx) or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)
-  if not expanded(ctx) and not item.is_error then
+  -- Collapsed: one line, the task cut so the rest always fits.
+  if detail() == "summary" and not expanded(ctx) then
+    local room = ctx.width - 4
+    for _, p in ipairs(parts) do room = room - bone.text.width(p[1]) end
+    local title = { { bone.text.truncate(task, math.max(room, 12)), "Accent" } }
+    append(title, parts)
+    return { title = { bone.text.clip(title, math.max(ctx.width - 4, 1)) }, body = {}, state = state }
+  end
+  local title = { { task, "Accent" } }
+  append(title, parts)
+
+  -- The report: the agent's last answer once it is known, else the call's
+  -- output (an error, or an answer from before agents worked on their own).
+  local text = a and require("bone.agents").report(a)
+  if not text and not a then text = item.output or item.live end
+  local failed = state == "failed"
+  local report = bone.ui.markdown(trim(text or ""), math.max(ctx.width - 8, 1))
+  local shown = (expanded(ctx) or failed) and #report or math.min(#report, AGENT_PREVIEW_MAX)
+  if not expanded(ctx) and not failed then
     -- Stop at the end of the opening paragraph, rather than leaving a
     -- dangling "Changes:" label. A leading heading can keep its paragraph.
     local heading = false
@@ -574,23 +612,40 @@ local function agent_content(item, ctx, args)
   if shown < #report then
     body[#body + 1] = { { more(#report - shown, "report line", ctx), "ToolSummary" } }
   end
-  local gutter_group = item.is_error and "ToolError" or "ToolGutter"
+  local gutter_group = failed and "ToolError" or "ToolGutter"
   local rows = {}
   for i, line in ipairs(body) do
     rows[#rows + 1] = nest({ i == #body and "      ╰ " or "      │ ", gutter_group }, line)
   end
-  return { title = title, body = rows }
+  return { title = title, body = rows, state = state }
 end
 
--- A message from a job or an agent (item.source): its first line, then the
--- rest as a short preview in a gutter, like a sub-agent's report. A click
--- or ctrl+t shows all of it.
+-- A message from someone other than the user (item.source). One that
+-- reports on work the chat started (source "result" from agents, "job"
+-- from a background shell job) is not drawn: the call's own row shows how
+-- it went. Others (an agent's "From …:"): collapsed, one line, the first
+-- line then the start of the rest; else the first line, then the rest as a
+-- short preview in a gutter, like a sub-agent's report. A click or ctrl+t
+-- shows all of it.
+local HIDDEN = { result = true, job = true }
+
 report = function(item, ctx)
+  if HIDDEN[item.source] then return nil end
   local full = detail() == "full"
   if toggled[tool_key(item)] then full = not full end
   local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
+  head = (trim(head):gsub(":$", ""))
+  if detail() == "summary" and not toggled[tool_key(item)] then
+    local line = { { "  ◆ ", "Accent" }, { head, "Dim" } }
+    local gist = trim(rest):match("^[^\n]*") or ""
+    if gist ~= "" then
+      line[#line + 1] = { " · ", "Dim" }
+      append(line, bone.ui.markdown(gist, 100000)[1] or { { gist, "Normal" } })
+    end
+    return images(item, { {}, bone.text.clip(line, math.max(ctx.width, 1)) }, ctx.width)
+  end
   local out = { {} }
-  append(out, wrap({ { (trim(head):gsub(":$", "")), "Dim" } }, ctx.width,
+  append(out, wrap({ { head, "Dim" } }, ctx.width,
     { first = { { "  ◆ ", "Accent" } }, rest = { { "    ", "Normal" } } }))
   local rows = bone.ui.markdown(trim(rest), math.max(ctx.width - 8, 1))
   local shown = full and #rows or math.min(#rows, AGENT_PREVIEW_MAX)
@@ -648,7 +703,14 @@ function bone.ui.tool_content(item, ctx)
   local name = item.name
   local err = done and item.is_error and gutter(out, width, "ToolOutput", "ToolError", ctx) or nil
 
-  if name == "subagent" then
+  if name == "subagent" and type(args.to) == "string" and args.to ~= "" then
+    -- A message to an agent or chat, not an agent of its own.
+    return { title = { { { "message", "ToolName" }, { " " .. args.to, "ToolArgs" } } },
+      body = err or (done and plain(out, width, ctx)) or {} }
+  elseif name == "subagent" and args.list == true then
+    return { title = { { { "subagent", "ToolName" }, { " list", "ToolArgs" } } },
+      body = err or (done and plain(out, width, ctx)) or {} }
+  elseif name == "subagent" then
     return agent_content(item, ctx, args)
   elseif name == "shell" then
     local body, code = split_exit_code(out)
@@ -656,6 +718,14 @@ function bone.ui.tool_content(item, ctx)
     if not done then
       -- What it has printed so far (tool/output).
       return { title = shell_label(args), body = gutter(item.live or "", width, "ToolOutput", "ToolGutter", ctx) }
+    end
+    local job = jobs.of(item)
+    if job then
+      local st = jobs.state(job)
+      return {
+        title = shell_label(args), state = st,
+        body = gutter(jobs.line(job, st), width, "ToolOutput", st == "failed" and "ToolError" or "ToolGutter", ctx),
+      }
     end
     return {
       title = shell_label(args),
@@ -726,10 +796,13 @@ end
 
 -- ---- tool summaries ------------------------------------------------------
 
--- Folded into a summary line: everything but sub-agents. Edits fold too,
--- counted: the line ends "edited N files (+34 -234)".
+-- Folded into a summary line: everything but starting a sub-agent, which
+-- gets a row of its own (messaging one, or listing them, folds). Edits fold
+-- too, counted: the line ends "edited N files (+34 -234)".
 local function foldable(t)
-  return t.name ~= "subagent"
+  if t.name ~= "subagent" then return true end
+  local args = type(t.arguments) == "table" and t.arguments or {}
+  return (type(args.to) == "string" and args.to ~= "") or args.list == true
 end
 
 local function arg(t, key)
@@ -813,6 +886,12 @@ local function summary(calls, width)
       end
     elseif t.name == "shell" then
       bump("shell", function(n) return "ran " .. plural(n, "shell command") end)
+    elseif t.name == "subagent" and arg(t, "to") then
+      bump("message", function(n)
+        return "messaged " .. (n == 1 and arg(t, "to") or plural(n, "agent"))
+      end, arg(t, "to"))
+    elseif t.name == "subagent" then
+      bump("agents", function() return "listed agents" end)
     else
       bump("tool:" .. t.name, function(n) return "called " .. t.name .. (n > 1 and " " .. n .. " times" or "") end)
     end
@@ -838,7 +917,8 @@ local function summary(calls, width)
   local text = table.concat(parts, ", ")
   local failed = 0
   for _, t in ipairs(calls) do
-    failed = failed + (t.done and t.is_error and 1 or 0)
+    local job = jobs.of(t)
+    if (t.done and t.is_error) or (job and jobs.state(job) == "failed") then failed = failed + 1 end
   end
   text = text:sub(1, 1):upper() .. text:sub(2)
   if failed > 0 then
@@ -910,9 +990,11 @@ local function summary_view(item, ctx)
       stretch[#stretch + 1] = t
     end
   end
+  -- A background job keeps its line running until it ends.
   local running = false
   for _, t in ipairs(stretch) do
-    running = running or not t.done
+    local job = t.done and jobs.of(t)
+    running = running or not t.done or (job and jobs.state(job) == "running") or false
   end
   local out = starts("tool", ctx)
   local text, tail = summary(stretch, ctx.width)
@@ -929,6 +1011,13 @@ local function summary_view(item, ctx)
     end
   else
     spans[1] = { shown, "ToolArgs" }
+  end
+  -- Failures close the line, in the error color.
+  local last = spans[#spans]
+  local before, failed = last[1]:match("^(.-)(, %d+ failed)$")
+  if failed and last[2] == "ToolArgs" then
+    last[1] = before
+    spans[#spans + 1] = { failed, "ToolError" }
   end
   append(out, wrap(spans, ctx.width, {
     first = running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } },
@@ -955,12 +1044,15 @@ render_tool = function(item, ctx, full)
   local custom = bone.ui.tool_views[item.name]
   local content = custom and custom(item, ctx) or bone.ui.tool_content(item, ctx)
 
+  -- A view may say how the call stands when that outlives the call (an
+  -- agent or a background job still working, or failing later).
+  local state = content.state or (not item.done and "running") or (item.is_error and "failed") or "done"
   local marker
-  if not item.done then
+  if state == "running" then
     marker = { "  " .. running_mark(item) .. " ", "ToolRunning" }
-  elseif item.is_error then
+  elseif state == "failed" then
     marker = { "  ✕ ", "ToolError" }
-  elseif item.name == "subagent" then
+  elseif item.name == "subagent" and not foldable(item) then
     marker = { "  ✓ ", "Accent" }
   else
     marker = { "    ", "Normal" }

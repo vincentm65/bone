@@ -3687,22 +3687,22 @@ async fn subagent_reports_have_a_task_header_and_a_markdown_preview() {
         report,
         false,
     )];
-    for detail in [0, 1] {
-        let text = std_tool_screen(&calls, 80, detail).await.join("\n");
-        assert!(
-            text.contains("✓ Expose active sessions · implementer · done"),
-            "{text}"
-        );
-        assert!(
-            text.contains("│ Implemented session/active in bone-proto and bone-core."),
-            "{text}"
-        );
-        assert!(text.contains("╰ ⋮ +"), "{text}");
-        assert!(text.contains("report lines (click or ctrl+t)"), "{text}");
-        assert!(!text.contains("Changes:"), "{text}");
-        assert!(!text.contains("Registered SessionActive"), "{text}");
-        assert!(!text.contains('`') && !text.contains("**"), "{text}");
-    }
+    // Collapsed (summary): the agent is one line, its report waits.
+    let text = std_tool_screen(&calls, 80, 0).await.join("\n");
+    assert!(text.contains("✓ Expose active sessions · implementer"), "{text}");
+    assert!(!text.contains("Implemented") && !text.contains('│'), "{text}");
+    // Rows: the line, then the report's opening paragraph.
+    let text = std_tool_screen(&calls, 80, 1).await.join("\n");
+    assert!(text.contains("✓ Expose active sessions · implementer"), "{text}");
+    assert!(
+        text.contains("│ Implemented session/active in bone-proto and bone-core."),
+        "{text}"
+    );
+    assert!(text.contains("╰ ⋮ +"), "{text}");
+    assert!(text.contains("report lines (click or ctrl+t)"), "{text}");
+    assert!(!text.contains("Changes:"), "{text}");
+    assert!(!text.contains("Registered SessionActive"), "{text}");
+    assert!(!text.contains('`') && !text.contains("**"), "{text}");
     let text = std_tool_screen(&calls, 80, 2).await.join("\n");
     assert!(text.contains("│ • Registered SessionActive."), "{text}");
     assert!(text.contains("╰ Validation: all checks passed."), "{text}");
@@ -3721,10 +3721,13 @@ async fn subagent_reports_have_a_task_header_and_a_markdown_preview() {
         "{text}"
     );
 
-    // Failures keep the entire explanation even at the default detail level.
+    // A failure collapses to one line that says why; open, it keeps the
+    // entire explanation.
     let calls = [("subagent", json!({"name": ""}), report, true)];
     let text = std_tool_screen(&calls, 80, 0).await.join("\n");
-    assert!(text.contains("✕ subagent · failed"), "{text}");
+    assert!(text.contains("✕ agent · failed: Implemented"), "{text}");
+    assert!(!text.contains("Validation"), "{text}");
+    let text = std_tool_screen(&calls, 80, 1).await.join("\n");
     assert!(text.contains("╰ Validation: all checks passed."), "{text}");
     assert!(!text.contains('⋮'), "{text}");
 }
@@ -3759,7 +3762,7 @@ async fn subagent_report_header_opens_the_running_session() {
     let screen = h.screen(80, 24);
     let y = screen
         .lines()
-        .position(|l| l.contains("Find callers · reviewer · running"))
+        .position(|l| l.contains("Find callers · reviewer"))
         .unwrap_or_else(|| panic!("{screen}")) as u16;
     h.app.mouse("down", "left", (10, y));
     h.settle().await;

@@ -23,7 +23,7 @@ end
 
 | Kind | Item fields |
 |---|---|
-| `user` | `text`, `source` (who sent it when not the user, e.g. `"job"` or `"agent"`), and once its turn ended `started_at` (ms) and `duration_ms` |
+| `user` | `text`, `source` (who sent it when not the user, e.g. `"agent"`, `"job"` or `"result"`), and once its turn ended `started_at` (ms) and `duration_ms` |
 | `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs), `started_at` (ms), `duration_ms`, `usage` |
 | `notice` | `text`, `error` |

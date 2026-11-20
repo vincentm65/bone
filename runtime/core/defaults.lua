@@ -104,11 +104,14 @@ bone.hook("process_exit", function(ev)
   if not bone.config.notify_job_exit or ev.state == "cancelled" then
     return
   end
-  local how = ev.state == "exited" and ("exit code " .. tostring(ev.code))
+  -- How it ended first, so a long command never hides it. The chat draws
+  -- no row for this message: the call that started the job shows it.
+  local how = ev.state == "exited" and ("exited " .. tostring(ev.code))
     or ev.state == "timed_out" and "timed out"
-    or ("failed: " .. tostring(ev.error or ev.signal))
-  local text = ("Background job %s (`%s`) finished after %ds: %s."):format(
-    ev.id, ev.command, math.floor((ev.elapsed_ms or 0) / 1000), how)
+    or ("failed (" .. tostring(ev.error or ev.signal) .. ")")
+  local secs = math.floor((ev.elapsed_ms or 0) / 1000)
+  local took = secs >= 60 and ("%dm %02ds"):format(math.floor(secs / 60), secs % 60) or (secs .. "s")
+  local text = ("Background job %s %s after %s: `%s`"):format(ev.id, how, took, ev.command)
   if ev.output and ev.output ~= "" then
     text = text .. "\n\nLast output:\n```\n" .. ev.output .. "\n```"
   end

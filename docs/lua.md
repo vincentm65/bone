@@ -1013,7 +1013,7 @@ end
 
 | Kind | Item fields |
 |---|---|
-| `user` | `text`, `images` (attachment references), `source` (who sent it when not the user: `"job"`, `"agent"`; drawn as a report), and once its turn ended `started_at` (ms since the epoch) and `duration_ms`: when the turn ran, from the core |
+| `user` | `text`, `images` (attachment references), `source` (who sent it when not the user: `"agent"`, drawn as one line, a report when opened; `"job"` and `"result"`, not drawn, since the background job's or agent's own call shows how it went), and once its turn ended `started_at` (ms since the epoch) and `duration_ms`: when the turn ran, from the core |
 | `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` (tokens of that model message, when the core sent them) |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs, from `tool/output`; the last 64 KB), `started_at` (ms since the epoch), `duration_ms`, and `usage` when it is the first call of a message without text |
 | `notice` | `text`, `error` |

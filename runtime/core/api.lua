@@ -245,8 +245,11 @@ end
 ---   bone.queue.add(id, text, mode, images, source)   mode "steer" (default) or "next";
 ---                                     idle sessions start a turn: { turn_id }, else { id };
 ---                                     source names a sender other than the user
----                                     ("agent", "job"): trays leave it out, and the
----                                     chat keeps it and draws it as a report
+---                                     ("agent", "job", "result"): trays leave it
+---                                     out. The chat draws "agent" as one line (a
+---                                     report when opened); "job" (a background
+---                                     job ended) and "result" (agents' answers)
+---                                     not at all: the calls that started them show it
 
 ---   bone.queue.list(id)              { { id, text, mode, created_at } }
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
