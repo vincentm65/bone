@@ -44,10 +44,10 @@ use bone_proto::Method;
 use bone_proto::methods::{
     AskList, AskRequested, AskRequestedParams, AskResolved, AskRespond, AskRespondParams, Empty,
     ProcessChanged, QueueAdd, QueueAddParams, QueueMode, SessionCreate, SessionCreateParams,
-    SessionCreated, SessionDeleted, SessionList, SessionMessages, SessionMessagesParams,
-    SessionUpdated, SettingsChanged, SettingsGet,
+    SessionDeleted, SessionMessages, SessionMessagesParams, SessionUpdated, SettingsChanged,
+    SettingsGet,
 };
-use bone_proto::types::{ImageAttachment, SessionInfo};
+use bone_proto::types::ImageAttachment;
 use bone_ui::chat::RunningTurn;
 use serde_json::Value;
 use tokio::runtime::Handle;
@@ -115,8 +115,6 @@ pub struct Gui {
     shown_at: Instant,
     /// Chats whose earlier turns are being loaded.
     earlier: std::collections::HashSet<usize>,
-    /// The core's sessions, newest first, without owned (sub-agent) ones.
-    pub sessions: Vec<SessionInfo>,
     /// Questions waiting for an answer, by id (oldest first).
     pub asks: BTreeMap<u64, AskRequestedParams>,
     pub settings: Value,
@@ -207,7 +205,6 @@ impl Gui {
             opts,
             chats: vec![ChatBuffer::new(None)],
             current: 0,
-            sessions: Vec::new(),
             asks: asks.into_iter().map(|a| (a.ask_id, a)).collect(),
             settings,
             draft: String::new(),
@@ -241,7 +238,6 @@ impl Gui {
             was_focused: false,
         };
         gui.forward(events);
-        gui.refresh_sessions();
         gui.load_lua();
         Ok(gui)
     }
@@ -345,19 +341,9 @@ impl Gui {
             } else {
                 self.reload(&p.session_id);
             }
-            self.refresh_sessions();
         } else if let Some(Ok(p)) = ev.parse::<SessionDeleted>() {
             self.session_deleted(&p.session_id);
-        } else if ev.parse::<SessionCreated>().is_some() {
-            self.refresh_sessions();
         }
-    }
-
-    fn refresh_sessions(&self) {
-        self.request::<SessionList>(Empty {}, |gui, r| match r {
-            Ok(list) => gui.sessions = list.into_iter().filter(|s| s.owner.is_none()).collect(),
-            Err(e) => gui.error(format!("cannot list sessions: {e}")),
-        });
     }
 
     fn chat_of(&self, session_id: &str) -> Option<usize> {
@@ -419,7 +405,6 @@ impl Gui {
                 self.info("session deleted".into());
             }
         }
-        self.refresh_sessions();
     }
 
     /// Send the prompt to the chat on screen (see [`Gui::submit_as`]).
@@ -571,7 +556,6 @@ impl Gui {
         self.settings = r.settings;
         self.asks = r.asks.into_iter().map(|a| (a.ask_id, a)).collect();
         self.reload_all();
-        self.refresh_sessions();
         bone_ui::lua::processes::clear(self);
         let current = self.chats[self.current].session_id().map(str::to_owned);
         bone_ui::lua::processes::follow(self, current);

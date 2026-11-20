@@ -18,12 +18,13 @@ use crate::data::Dep;
 use bone_proto::client::Event;
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, QueueChanged,
-    QueueMode, QueuedMessage, ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams,
-    ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams, TurnStarted, TurnSteered,
+    QueueMode, QueuedMessage, SessionChanged, ToolFinished, ToolFinishedParams, ToolOutput,
+    ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
+    TurnStarted, TurnSteered,
 };
 use bone_proto::types::{
     ChatMessage, DeltaKind, ImageAttachment, SessionInfo, ToolCall, ToolTiming, TurnId,
-    TurnOutcome, Usage,
+    TurnOutcome, TurnTiming, Usage,
 };
 use serde_json::{Value, json};
 
@@ -150,6 +151,8 @@ pub struct ChatBuffer<L> {
     /// How finished turns ended, by the id of their user message's entry.
     /// Only turns seen finishing here; loaded history has none.
     pub outcomes: HashMap<usize, TurnOutcome>,
+    /// When finished turns ran, by turn number (the core's, loaded too).
+    pub turn_times: HashMap<usize, TurnTiming>,
     /// Each entry's id: stable, never reused, increasing along `entries`
     /// (entries are only pushed, popped or all cleared). Items, the render
     /// cache and everything else about an entry go by its id.
@@ -216,6 +219,7 @@ impl<L> Default for ChatBuffer<L> {
             commands: Vec::new(),
             queue_rev: 0,
             outcomes: HashMap::new(),
+            turn_times: HashMap::new(),
             ids: Vec::new(),
             next_id: 0,
             revs: Vec::new(),
@@ -302,6 +306,7 @@ impl<L> ChatBuffer<L> {
         self.tool_meta.clear();
         self.message_usage.clear();
         self.outcomes.clear();
+        self.turn_times.clear();
         for m in messages {
             match m {
                 ChatMessage::System { .. } => {}
@@ -325,11 +330,16 @@ impl<L> ChatBuffer<L> {
         });
     }
 
-    /// When the loaded transcript's tool calls ran (`session/messages`
-    /// `tool_times`), as the live events would have told. Right after `load`,
-    /// before anything is drawn from it.
-    pub fn set_tool_times(&mut self, times: &BTreeMap<String, ToolTiming>) {
-        for (call_id, t) in times {
+    /// When the loaded transcript's tool calls and turns ran
+    /// (`session/messages`' `tool_times` and `turn_times`), as the live
+    /// events would have told. Right after `load`, before anything is drawn.
+    pub fn set_times(
+        &mut self,
+        tools: &BTreeMap<String, ToolTiming>,
+        turns: &BTreeMap<usize, TurnTiming>,
+    ) {
+        self.turn_times.extend(turns);
+        for (call_id, t) in tools {
             let meta = self.tool_meta.entry(call_id.clone()).or_default();
             meta.started_at = Some(t.started_at);
             meta.duration_ms = Some(t.duration_ms);
@@ -533,6 +543,11 @@ impl<L> ChatBuffer<L> {
             .rposition(|e| matches!(e, Entry::User(..)))
         {
             self.outcomes.insert(self.ids[user], t.outcome.clone());
+        }
+        if let Some(timing) = t.timing {
+            let users = self.entries.iter().filter(|e| matches!(e, Entry::User(..)));
+            let turn = self.omitted_turns + users.count();
+            self.turn_times.insert(turn, timing);
         }
         match &t.outcome {
             TurnOutcome::Completed => {}
@@ -1190,6 +1205,7 @@ pub fn apply_event<'a, L: 'a>(
         p.source.clone()
     ));
     on!(TurnFinished, |c, p| c.turn_finished(&p));
+    on!(SessionChanged, |c, p| c.session = Some(p));
     on!(QueueChanged, |c, p| {
         c.set_queue(p.items, p.paused);
         if let Some(error) = p.error {
@@ -1354,11 +1370,17 @@ mod tests {
         });
         assert_eq!(keys(&c), ["e1", "note-1", "e3"]);
         assert_eq!(c.item_data(c.items()[2], 3, false)["usage"]["input"], 5);
+        let timing = Some(TurnTiming {
+            started_at: 1,
+            duration_ms: 2,
+        });
         c.turn_finished(&TurnFinishedParams {
             session_id: "s".into(),
             turn_id: 1,
             outcome: TurnOutcome::Completed,
+            timing,
         });
         assert!(c.outcomes.contains_key(&1));
+        assert_eq!(c.turn_times.get(&1).copied(), timing);
     }
 }

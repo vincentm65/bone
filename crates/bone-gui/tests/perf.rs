@@ -113,6 +113,7 @@ fn fill_chat(chat: &mut bone_gui::ChatBuffer) {
             session_id: "s".into(),
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            timing: None,
         });
     }
 }
@@ -231,6 +232,7 @@ async fn desktop_frames() {
         session_id: "s".into(),
         turn_id: 80,
         outcome: TurnOutcome::Completed,
+        timing: None,
     });
     g.gui.view.invalidate();
     for _ in 0..4 {
@@ -297,6 +299,7 @@ async fn desktop_frames() {
             session_id: "s".into(),
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            timing: None,
         });
     }
     g.gui.view.invalidate();

@@ -11,8 +11,8 @@
 -- per chat, its title and a status word (Working, Waiting, Done, Failed) or
 -- its time.
 -- Views subscribe with M.watch(fn); fn(kind, ev) runs after each change:
--- "turn" (ev.running), "created", "updated", "deleted", "shells", "attention",
--- "archived", "pinned", "folded".
+-- "turn" (ev.running), "created", "updated" (a pin or an archive too),
+-- "deleted", "shells", "attention", "folded".
 local M = {}
 
 local agents = require("bone.agents")
@@ -38,44 +38,13 @@ bone.hl.set("SessionWorking", { link = "Accent", default = true })
 bone.hl.set("SessionDone", { link = "Success", default = true })
 bone.hl.set("SessionFailed", { link = "ErrorMsg", default = true })
 
--- Pinned and archived chats are kept where every frontend on this machine
--- reads them (state/shared/), so the TUI and the desktop agree. Each side
--- once kept its own (`old`): it is copied over once (sessions-moved says
--- so) and left as it was, for an older bone that still reads it.
-local moved = bone.state.load("sessions-moved")
-local function shared(name, old)
-  local ok, set = pcall(bone.state.load, name, { shared = true })
-  set = ok and type(set) == "table" and set or {}
-  if old and not moved[name] then
-    local had = bone.state.load(old)
-    for id, on in pairs(type(had) == "table" and had or {}) do set[id] = set[id] or on end
-    bone.state.save(name, set, { shared = true })
-    moved[name] = true
-    bone.state.save("sessions-moved", moved)
-  end
-  return set
-end
-M.archived = shared("sessions-archived", "sessions-archived")
-M.pinned = shared("sessions-pinned", "sidebar-pinned")
--- Folded sections (M.is_folded), by index: true or false where chosen.
-M.folded = shared("sessions-folded")
-
--- Read them again: the other frontend may have changed them.
-local function reload()
-  M.archived = shared("sessions-archived")
-  M.pinned = shared("sessions-pinned")
-  M.folded = shared("sessions-folded")
+-- Pinned and archived chats, by id: the core keeps them with each session
+-- (`session/set`), so every frontend shows the same.
+M.pinned, M.archived = {}, {}
+local function note(s)
+  M.pinned[s.session_id], M.archived[s.session_id] = s.pinned or nil, s.archived or nil
 end
 
--- Change one chat in a shared set, reading it first so the other
--- frontend's changes are kept.
-local function mark(name, id, on)
-  reload()
-  local set = name == "sessions-pinned" and M.pinned or M.archived
-  if set[id] == (on or nil) then return end
-  set[id] = on or nil
-  bone.state.save(name, set, { shared = true })
-end
 local watchers = {}
 
 --- Call fn(kind, ev) after each change; returns a function that stops it.
@@ -163,9 +132,7 @@ end
 --- Active until it runs again.
 function M.archive(id)
   id = id or (bone.chat.session() or {}).session_id
-  if not id then return end
-  mark("sessions-archived", id, true)
-  changed("archived", { session_id = id })
+  if id then bone.request("session/set", { session_id = id, archived = true }) end
 end
 
 --- Whether a chat in section `n` can be archived: one in Active or
@@ -179,7 +146,7 @@ end
 function M.rename(id, title, done)
   title = (title or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if title == "" then return end
-  bone.request("session/rename", { session_id = id, title = title }, function(_, err)
+  bone.request("session/set", { session_id = id, title = title }, function(_, err)
     if err then bone.notify("rename: " .. tostring(err), "error") end
     if done then done() end
   end)
@@ -188,9 +155,7 @@ end
 --- Pin chat `id`, or unpin it (`on` false): pinned chats are listed first,
 --- in every frontend, and are never archived.
 function M.pin(id, on)
-  if not id then return end
-  mark("sessions-pinned", id, on)
-  changed("pinned", { session_id = id })
+  if id then bone.request("session/set", { session_id = id, pinned = on and true or false }) end
 end
 
 --- Pin chat `id` if it is not, else unpin it.
@@ -205,19 +170,19 @@ M.sections = { "Pinned", "Active", "Running", "Archived" }
 local FOLDED = { [4] = true }
 
 --- Whether section `n` (an index into M.sections) is folded: its header
---- stays, its chats are hidden. Every frontend shares it.
+--- stays, its chats are hidden. Every frontend shares it (the setting
+--- `chats.folded`).
 function M.is_folded(n)
-  local on = M.folded[tostring(n)]
+  local on = (bone.settings.get("chats.folded") or {})[tostring(n)]
   if on == nil then return FOLDED[n] or false end
   return on == true
 end
 
 --- Fold section `n`, or unfold it.
 function M.toggle_folded(n)
-  reload()
-  M.folded[tostring(n)] = not M.is_folded(n)
-  bone.state.save("sessions-folded", M.folded, { shared = true })
-  changed("folded", { section = n })
+  local folded = bone.settings.get("chats.folded") or {}
+  folded[tostring(n)] = not M.is_folded(n)
+  bone.settings.set("chats.folded", folded)
 end
 
 --- Which section chat `id` belongs in (an index into M.sections), with
@@ -279,7 +244,6 @@ end
 --- (M.section: groups[id] and sizes are indexes into M.sections), newest
 --- first in each.
 function M.grouped(all, query, stats)
-  reload()
   local items, groups, activities, sizes = {}, {}, {}, { 0, 0, 0, 0 }
   local running = false
   query = (query or ""):lower()
@@ -309,6 +273,7 @@ function M.fetch_list(done)
     if err then return done(nil, err) end
     local all = {}
     for _, s in ipairs(list or {}) do
+      note(s)
       if s.owner then
         agents.add(s)
       else
@@ -539,7 +504,6 @@ local function turn_changed(ev, running)
   M.live[id], M.touched[id] = running, os.time()
   M.started[id] = running and os.time() or nil
   if running then M.failed[id] = nil end
-  if running then mark("sessions-archived", id, false) end
   -- A turn that ends in a chat you are not looking at is new to you (an
   -- agent's ends in its own chat, which you did not start), and says so
   -- when it failed.
@@ -566,6 +530,13 @@ bone.on("process/changed", function(ev)
   changed("shells", ev)
 end)
 bone.on("session/updated", function(ev) changed("updated", ev) end)
+bone.on("session/changed", function(ev)
+  note(ev)
+  changed("updated", ev)
+end)
+bone.on("settings/changed", function(ev)
+  if ev.path == "chats.folded" then changed("folded", {}) end
+end)
 bone.on("session/deleted", function(ev)
   M.live[ev.session_id], M.touched[ev.session_id] = nil, nil
   M.unread[ev.session_id], M.failed[ev.session_id], M.started[ev.session_id] = nil, nil, nil

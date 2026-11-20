@@ -810,10 +810,9 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
         .map(str::trim)
         .filter(|t| !t.is_empty())
     {
-        info = inner
-            .sessions
-            .rename(&info.session_id, title)
-            .map_err(|e| e.to_string())?;
+        let mut s = session.lock().unwrap();
+        s.set(Some(title), None, None).map_err(|e| e.to_string())?;
+        info = s.info.clone();
     }
     inner.created_session(&info);
     serde_json::to_value(info).map_err(|e| e.to_string())

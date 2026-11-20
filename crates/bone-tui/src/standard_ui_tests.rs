@@ -251,14 +251,8 @@ async fn standard_summary_animation_uses_clock_and_finishes_without_retyping_his
 }
 
 #[tokio::test]
-async fn standard_turn_footer_persists_on_resume_and_not_in_statusline() {
+async fn standard_turn_footer_comes_from_the_core_not_the_statusline() {
     let (mut h, dir) = Harness::with_config("").await;
-    let mut other = Harness::build(Some(dir.path().to_owned())).await;
-    other.app.load_user_config();
-    exec(
-        &mut h,
-        "TEST_NOW = 1700000000000; bone.now = function() return TEST_NOW end",
-    );
     h.input("old question{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "old question"))
         .await;
@@ -274,8 +268,12 @@ async fn standard_turn_footer_persists_on_resume_and_not_in_statusline() {
         usage: None,
     })
     .await;
-    exec(&mut h, "TEST_NOW = TEST_NOW + 65000");
-    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+    let timing = Some(TurnTiming {
+        started_at: 1_700_000_000_000,
+        duration_ms: 65_000,
+    });
+    let finished = finished("s-new", TurnOutcome::Completed);
+    h.emit::<TurnFinished>(TurnFinishedParams { timing, ..finished })
         .await;
     let screen = h.screen(120, 30);
     assert_eq!(screen.matches("Worked for 1m 05s").count(), 1, "{screen}");
@@ -284,32 +282,6 @@ async fn standard_turn_footer_persists_on_resume_and_not_in_statusline() {
         screen.find("old answer").unwrap() < screen.find("Worked for").unwrap(),
         "{screen}"
     );
-    // Another TUI receives these notifications without having this chat open,
-    // then saves its own chat. Neither operation may erase our saved footer.
-    other
-        .emit::<TurnStarted>(started("s-new", "old question"))
-        .await;
-    other
-        .emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
-        .await;
-    exec(&mut other, "bone.api.open_session('s-other')");
-    other.settle().await;
-    other.emit::<TurnStarted>(started("s-other", "other")).await;
-    other
-        .emit::<TurnFinished>(finished("s-other", TurnOutcome::Completed))
-        .await;
-    drop(other);
-    let saved: Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join("state/tui/standard-turn-timing.s-new.json"))
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(saved["turns"]["1"]["finished"], json!(1700000065000u64));
-    assert!(
-        !dir.path()
-            .join("state/tui/personal-turn-timing.json")
-            .exists()
-    );
     let status = statusline(&mut h, "s-new");
     assert!(
         !status.to_lowercase().contains("worked") && !status.to_lowercase().contains("finished at"),
@@ -317,8 +289,8 @@ async fn standard_turn_footer_persists_on_resume_and_not_in_statusline() {
     );
     drop(h);
 
-    // A fresh app has new item keys and only the core's user/assistant
-    // messages; timing must come from persisted state, not UI-only items.
+    // A fresh app has only what the core sends: the transcript and when
+    // its turns ran.
     let mut resumed = Harness::build(Some(dir.path().to_owned())).await;
     resumed.app.load_user_config();
     exec(&mut resumed, "bone.api.open_session('s-new')");
@@ -528,7 +500,7 @@ async fn standard_ui_shows_what_waits_for_you() {
     // The sidebar's rows: a dot before the title, which blinks while the
     // chat waits (its color comes and goes), and stays for a reply not seen.
     h.input("{ctrl+o}").await;
-    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.unfold_archive().await;
     h.settle().await;
     let screen = h.screen(100, 30);
     assert!(screen.contains("second"), "{screen}");

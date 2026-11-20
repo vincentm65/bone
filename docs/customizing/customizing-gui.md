@@ -387,9 +387,8 @@ finished chat waits for review before it is archived is
 set in `ui.lua` or `gui.lua`; the older `bone.ui.sessions_recent_seconds`
 still works), and the rows are made again each minute, so a chat moves when
 its time is up. Pin a chat with the pin over its row or `ctrl+t`. Pins and
-archives are shared with the TUI (`state/shared/sessions-pinned.json` and
-`sessions-archived.json`), and `bone.chats` has them: `section(id, at)`,
-`pin(id, on)`, `archive(id)`. The sidebar is
+archives are the core's (`session/mark`), so the TUI shows the same, and
+`bone.chats` has them: `section(id, at)`, `pin(id, on)`, `archive(id)`. The sidebar is
 `require("bone.desktop.sidebar")`: replace it to draw another one.
 
 ### More than one chat

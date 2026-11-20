@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::types::{
     AskId, ChatMessage, DeltaKind, SessionId, SessionInfo, ToolCall, ToolTiming, TurnId,
-    TurnOutcome, Usage,
+    TurnOutcome, TurnTiming, Usage,
 };
 
 /// The lifecycle state of a managed shell process.
@@ -157,7 +157,7 @@ pub const METHODS: &[&str] = &[
     SessionList::METHOD,
     SessionActive::METHOD,
     SessionMessages::METHOD,
-    SessionRename::METHOD,
+    SessionSet::METHOD,
     SessionCd::METHOD,
     SessionDelete::METHOD,
     SessionCompact::METHOD,
@@ -221,6 +221,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     SessionCompacted::METHOD,
     SessionDeleted::METHOD,
     SessionCreated::METHOD,
+    SessionChanged::METHOD,
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
     SettingsChanged::METHOD,
@@ -354,22 +355,32 @@ pub struct SessionMessagesResult {
     /// with their results (not calls from before cores kept times).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_times: BTreeMap<String, ToolTiming>,
+    /// When the finished turns in `messages` ran, by turn number: that of
+    /// the last user message before each ended (omitted ones counted).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turn_times: BTreeMap<usize, TurnTiming>,
 }
 
 method!(
-    /// Give a session a title (replacing the one taken from its first
-    /// message).
-    SessionRename, "session/rename", SessionRenameParams => SessionInfo
+    /// Change what a session is called and where it is listed: a title
+    /// (replacing the one taken from its first message), pinned, archived.
+    /// Fields left out stay; a change comes as `session/changed`.
+    SessionSet, "session/set", SessionSetParams => SessionInfo
 );
 method!(
     /// Delete a session and its file. Not while a turn runs.
     SessionDelete, "session/delete", SessionRef => ()
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRenameParams {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSetParams {
     pub session_id: SessionId,
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 method!(
@@ -973,6 +984,10 @@ notification!(
     SessionCreated, "session/created", SessionInfo
 );
 notification!(
+    /// A session's info changed: its title, folder, pinned or archived.
+    SessionChanged, "session/changed", SessionInfo
+);
+notification!(
     /// A session was deleted (by any client).
     SessionDeleted, "session/deleted", SessionRef
 );
@@ -1128,6 +1143,9 @@ pub struct TurnFinishedParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub outcome: TurnOutcome,
+    /// When it ran, if it got as far as saving its user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TurnTiming>,
 }
 
 // ---- Store -----------------------------------------------------------------

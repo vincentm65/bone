@@ -33,10 +33,10 @@ use bone_proto::methods::{
     ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList, ProcessesResult, QueueAdd,
     QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear, QueueMode,
     QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList, SecretsSet,
-    SessionActive, SessionCd, SessionCompact, SessionCompactParams, SessionCreate,
+    SessionActive, SessionCd, SessionChanged, SessionCompact, SessionCompactParams, SessionCreate,
     SessionCreateParams, SessionCreated, SessionDelete, SessionDeleted, SessionList,
-    SessionMessages, SessionMessagesParams, SessionMessagesResult, SessionRef, SessionRename,
-    SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet,
+    SessionMessages, SessionMessagesParams, SessionMessagesResult, SessionRef, SessionSet,
+    SessionSetParams, SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet,
     SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery,
     StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
     TurnSteerParams,
@@ -155,7 +155,12 @@ impl Inner {
                 cancel: cancel.clone(),
                 closing: false,
                 after_cancel: 0,
+                started_at: None,
             });
+            // Running again takes it out of the archive.
+            if s.set(None, None, Some(false)).unwrap_or(false) {
+                self.emit::<SessionChanged>(s.info.clone());
+            }
             (turn_id, cancel)
         };
         // The turn saves the message and announces itself after its
@@ -363,6 +368,21 @@ impl Inner {
         self.start_next(session);
     }
 
+    /// Index sessions written while no core was running (or before the
+    /// index existed, or since it started over) without holding anything up;
+    /// clients list them again if that found anything.
+    pub(crate) fn catch_up(self: &Arc<Self>) {
+        let inner = self.clone();
+        std::thread::spawn(move || {
+            if inner.sessions.catch_up() {
+                inner.emit::<SessionUpdated>(SessionUpdatedParams {
+                    session_id: String::new(),
+                    reason: "indexed".into(),
+                });
+            }
+        });
+    }
+
     /// Move a session to `dir` (relative: from where it is now), for its
     /// next turn on. A running turn was started where it is, so not then.
     pub(crate) fn session_cd(&self, id: &str, dir: &str) -> Result<SessionInfo, RpcError> {
@@ -388,10 +408,7 @@ impl Inner {
                 .map_err(|e| RpcError::internal(format!("cannot save session: {e}")))?;
             s.info.clone()
         };
-        self.emit::<SessionUpdated>(SessionUpdatedParams {
-            session_id: id.to_owned(),
-            reason: "cd".into(),
-        });
+        self.emit::<SessionChanged>(info.clone());
         Ok(info)
     }
 
@@ -504,10 +521,7 @@ impl Core {
             mcp::oauth::set_dir(source.config_dir.clone());
         }
         core.inner.mcp.apply(core.inner.runtime().mcp.clone());
-        // Index sessions written while no core was running (or before the
-        // index existed) without holding up startup.
-        let inner = core.inner.clone();
-        std::thread::spawn(move || inner.sessions.catch_up());
+        core.inner.catch_up();
         core
     }
 
@@ -649,6 +663,9 @@ impl Core {
                 dispatch::<SessionCreate, _>(params, |p| self.session_create(p))
             }
             SessionList::METHOD => {
+                if self.inner.sessions.index().is_some_and(|i| i.take_reset()) {
+                    self.inner.catch_up();
+                }
                 let inner = self.inner.clone();
                 tokio::task::spawn_blocking(move || {
                     dispatch::<SessionList, _>(params, |_| {
@@ -664,9 +681,7 @@ impl Core {
             SessionMessages::METHOD => {
                 dispatch::<SessionMessages, _>(params, |p| self.session_messages(p))
             }
-            SessionRename::METHOD => {
-                dispatch::<SessionRename, _>(params, |p| self.session_rename(p))
-            }
+            SessionSet::METHOD => dispatch::<SessionSet, _>(params, |p| self.session_set(p)),
             SessionCd::METHOD => {
                 dispatch::<SessionCd, _>(params, |p| self.inner.session_cd(&p.session_id, &p.cwd))
             }
@@ -1123,21 +1138,19 @@ impl Core {
         Ok(info)
     }
 
-    fn session_rename(&self, p: SessionRenameParams) -> Result<SessionInfo, RpcError> {
-        let title = p.title.trim();
-        if title.is_empty() {
+    fn session_set(&self, p: SessionSetParams) -> Result<SessionInfo, RpcError> {
+        let title = p.title.as_deref().map(str::trim);
+        if title == Some("") {
             return Err(RpcError::invalid_params("the title is empty"));
         }
-        let info = self
-            .inner
-            .sessions
-            .rename(&p.session_id, title)
-            .map_err(session_error)?;
-        self.inner.emit::<SessionUpdated>(SessionUpdatedParams {
-            session_id: p.session_id,
-            reason: "rename".into(),
-        });
-        Ok(info)
+        let session = (self.inner.sessions.get(&p.session_id)).map_err(session_error)?;
+        let mut s = session.lock().unwrap();
+        let changed = (s.set(title, p.pinned, p.archived))
+            .map_err(|e| RpcError::internal(format!("cannot save session: {e}")))?;
+        if changed {
+            self.inner.emit::<SessionChanged>(s.info.clone());
+        }
+        Ok(s.info.clone())
     }
 
     fn session_delete(&self, p: SessionRef) -> Result<(), RpcError> {
@@ -1201,14 +1214,19 @@ impl Core {
                 _ => None,
             })
             .collect();
+        let omitted_turns = s.messages[..from].iter().filter(|m| is_user(m)).count();
+        let turn_times = (s.turn_ends.iter().filter(|t| t.turn > omitted_turns))
+            .map(|t| (t.turn, t.timing))
+            .collect();
         Ok(SessionMessagesResult {
             queue: s.queue.clone(),
             queue_paused: s.queue_paused,
             info: s.info.clone(),
             messages: s.messages[from..].to_vec(),
             active_turn: s.active.as_ref().map(|a| a.turn_id),
-            omitted_turns: s.messages[..from].iter().filter(|m| is_user(m)).count(),
+            omitted_turns,
             tool_times,
+            turn_times,
         })
     }
 

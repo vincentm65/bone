@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use bone_proto::client::{Client, EventStream};
 use bone_proto::methods::*;
-use bone_proto::types::{ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, Usage};
+use bone_proto::types::{
+    ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, TurnTiming, Usage,
+};
 use bone_proto::{Message, Notification, RpcError, transport};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -49,12 +51,6 @@ fn loaded_info(id: &str) -> Value {
 fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
     // The fake core has one core plugin, `corepart`; any other name is a
     // TUI-only plugin to it.
-    if method == "session/rename" {
-        return Ok(info(
-            params["session_id"].as_str().unwrap(),
-            params["title"].as_str(),
-        ));
-    }
     if let "plugin/load" | "plugin/unload" | "plugin/reload" = method {
         let name = params["name"].as_str().unwrap_or_default();
         if name != "corepart" {
@@ -135,9 +131,38 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 { "role": "user", "content": "old question" },
                 { "role": "assistant", "content": "old answer" },
             ],
+            "turn_times": { "1": { "started_at": 1700000000000u64, "duration_ms": 65000 } },
         }),
         _ => Value::Null,
     })
+}
+
+/// The fake core: `reply`, but its sessions are as `session/set` requests
+/// so far (`log`) changed them, and a change is sent on as `session/changed`.
+type Reply = (Result<Value, RpcError>, Option<Value>);
+fn fake(method: &str, params: &Value, log: &[(String, Value)]) -> Reply {
+    if method != "session/list" && method != "session/set" {
+        return (reply(method, params), None);
+    }
+    let mut list: Vec<Value> =
+        serde_json::from_value(reply("session/list", params).unwrap()).unwrap();
+    for (_, p) in log.iter().filter(|(m, _)| m == "session/set") {
+        let id = p["session_id"].as_str().unwrap();
+        if !list.iter().any(|s| s["session_id"] == id) {
+            list.push(info(id, None));
+        }
+        let s = list.iter_mut().find(|s| s["session_id"] == id).unwrap();
+        for k in ["title", "pinned", "archived"] {
+            if !p[k].is_null() {
+                s[k] = p[k].clone();
+            }
+        }
+    }
+    if method == "session/list" {
+        return (Ok(json!(list)), None);
+    }
+    let s = (list.into_iter()).find(|s| s["session_id"] == params["session_id"]);
+    (Ok(s.clone().unwrap()), s)
 }
 
 impl Harness {
@@ -199,12 +224,17 @@ impl Harness {
                 let params = params.unwrap_or(Value::Null);
                 log2.lock().unwrap().push((method.clone(), params.clone()));
                 let failing = fail2.lock().unwrap().as_deref() == Some(method.as_str());
-                let result = if failing {
-                    Err(RpcError::new(1, "nope"))
+                let (result, event) = if failing {
+                    (Err(RpcError::new(1, "nope")), None)
                 } else {
-                    reply(&method, &params)
+                    fake(&method, &params, &log2.lock().unwrap())
                 };
                 let _ = server_end.tx.send(Message::Response { id, result }).await;
+                if let Some(info) = event {
+                    let method = SessionChanged::METHOD.into();
+                    let params = Some(info);
+                    let _ = (server_end.tx.send(Message::Notification { method, params })).await;
+                }
             }
         });
         let (client, events) = Client::new(client_end);
@@ -259,6 +289,19 @@ impl Harness {
         };
         self.push.send(msg).await.unwrap();
         self.settle().await;
+    }
+
+    /// Unfold the sidebar's archive: its fold is saved as a setting, which
+    /// the core then announces.
+    async fn unfold_archive(&mut self) {
+        self.lua("require('bone.chats').toggle_folded(4)").await;
+        let set = self.requests("settings/set").pop().unwrap();
+        let changed = serde_json::from_value(json!({
+            "path": "chats.folded",
+            "value": set["value"],
+            "settings": { "chats": { "folded": set["value"] } },
+        }));
+        self.emit::<SettingsChanged>(changed.unwrap()).await;
     }
 
     fn requests(&self, method: &str) -> Vec<Value> {
@@ -321,6 +364,7 @@ fn finished(session: &str, outcome: TurnOutcome) -> TurnFinishedParams {
         session_id: session.into(),
         turn_id: 1,
         outcome,
+        timing: None,
     }
 }
 
@@ -729,9 +773,8 @@ async fn session_sidebar_groups_live_and_recent_chats() {
 }
 
 #[tokio::test]
-async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
+async fn session_sidebar_pins_with_ctrl_t_in_the_core() {
     let mut h = Harness::new().await;
-    let pins = h._dir.as_ref().unwrap().path().join("state/shared/sessions-pinned.json");
     h.input("{ctrl+o}").await;
     // The first row is selected: "first", which runs.
     h.input("{ctrl+t}").await;
@@ -740,11 +783,11 @@ async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
         screen.contains("Pinned 1") && !screen.contains("Running"),
         "{screen}"
     );
-    let saved = std::fs::read_to_string(&pins).unwrap();
-    assert!(saved.contains("s-one"), "{saved}");
-    // Pinned in the desktop (the same file): it shows on the next rebuild.
-    std::fs::write(&pins, r#"{ "s-one": true, "s-two": true }"#).unwrap();
-    h.lua("bone.ui.sessions_archive_after = 7200").await;
+    let pin = json!({ "session_id": "s-one", "pinned": true });
+    assert_eq!(h.requests("session/set"), [pin]);
+    // Pinned in the desktop: the core says so.
+    h.lua("bone.request('session/set', { session_id = 's-two', pinned = true })")
+        .await;
     assert!(h.screen(80, 24).contains("Pinned 2"));
     h.input("{ctrl+t}").await;
     let screen = h.screen(80, 24);
@@ -752,45 +795,25 @@ async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
         screen.contains("Pinned 1") && screen.contains("Running 1"),
         "{screen}"
     );
-    let saved = std::fs::read_to_string(&pins).unwrap();
-    assert!(!saved.contains("s-one") && saved.contains("s-two"), "{saved}");
 }
 
 #[tokio::test]
-async fn session_sidebar_copies_the_old_archive_list_to_the_shared_one_once() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("state/tui")).unwrap();
-    std::fs::write(
-        dir.path().join("state/tui/sessions-archived.json"),
-        r#"{ "s-one": true }"#,
-    )
-    .unwrap();
-    let mut h = Harness::build(Some(dir.path().to_owned())).await;
-    h.app.load_user_config();
-    h.settle().await;
-    let shared =
-        std::fs::read_to_string(dir.path().join("state/shared/sessions-archived.json")).unwrap();
-    assert!(shared.contains("s-one"), "{shared}");
-    // Copied once: unarchived in the shared list, the old one does not
-    // bring it back.
-    h.lua("bone.state.save('sessions-archived', {}, { shared = true })").await;
-    h.lua("package.loaded['bone.chats'] = nil; require('bone.chats')").await;
-    let shared =
-        std::fs::read_to_string(dir.path().join("state/shared/sessions-archived.json")).unwrap();
-    assert!(!shared.contains("s-one"), "{shared}");
-    h.lua("bone.state.save('sessions-archived', { ['s-one'] = true }, { shared = true })").await;
-    // Archived by hand: it stays archived after its turn ends.
+async fn session_sidebar_archives_in_the_core() {
+    let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
     h.emit::<TurnFinished>(finished("s-one", TurnOutcome::Completed))
         .await;
-    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.lua("require('bone.chats').archive('s-one')").await;
+    let archive = json!({ "session_id": "s-one", "archived": true });
+    assert_eq!(h.requests("session/set"), [archive]);
+    h.unfold_archive().await;
     assert!(h.screen(80, 24).contains("Archived 2"));
 }
 #[tokio::test]
 async fn session_picker_filters_and_opens() {
     let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
-    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.unfold_archive().await;
     h.settle().await;
     // Conversations use a docked Lua panel, not a floating picker.
     assert_eq!(
@@ -1503,9 +1526,7 @@ async fn rapid_streaming_deltas_do_not_redraw_every_token() {
         session_id: "s-new".into(),
         cwd: "/work".into(),
         created_at: 0,
-        title: None,
-        parent: None,
-        owner: None,
+        ..Default::default()
     });
     h.app.chats[0].turn_started(100, "new question");
     h.app.chats[0].delta(&MessageDeltaParams {
@@ -3135,7 +3156,7 @@ async fn session_commands_rename_and_delete() {
 
     h.input("/rename Typo hunt{enter}").await;
     assert_eq!(h.message(), "renamed to Typo hunt");
-    assert_eq!(h.requests("session/rename")[0]["title"], "Typo hunt");
+    assert_eq!(h.requests("session/set")[0]["title"], "Typo hunt");
     assert!(h.screen(80, 24).contains("Typo hunt"));
 
     // Any client's delete clears the chat that shows it.
@@ -3671,12 +3692,12 @@ async fn subagent_report_header_opens_the_running_session() {
         cwd: "/work".into(),
         created_at: 0,
         title: Some("Find callers".into()),
-        parent: None,
         owner: Some(bone_proto::types::SessionOwner {
             session_id: "s-new".into(),
             call_id: Some("c1".into()),
             name: Some("reviewer".into()),
         }),
+        ..Default::default()
     })
     .await;
     let screen = h.screen(80, 24);
@@ -5372,7 +5393,7 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     .await;
     h.lua("bone.api.open_session('history-4500')").await;
     h.input("{ctrl+o}").await;
-    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.unfold_archive().await;
     h.settle().await;
     // First draw must reveal the current chat, not just select it offscreen.
     assert!(h.screen(100, 24).contains("conversation 4500"));

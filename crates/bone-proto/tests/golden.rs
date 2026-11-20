@@ -117,8 +117,7 @@ fn info() -> SessionInfo {
         cwd: "/home/me/project".into(),
         created_at: 1_790_000_000,
         title: Some("Fix the typo in main.rs".into()),
-        parent: None,
-        owner: None,
+        ..Default::default()
     }
 }
 
@@ -222,6 +221,14 @@ fn requests() {
                     started_at: 1_700_000_000_000,
                     duration_ms: 2400,
                     generation_ms: Some(800),
+                },
+            )]
+            .into(),
+            turn_times: [(
+                1,
+                TurnTiming {
+                    started_at: 1_700_000_000_000,
+                    duration_ms: 3600,
                 },
             )]
             .into(),
@@ -454,14 +461,17 @@ fn requests() {
             reason: "manual".into(),
         },
     );
-    exchange::<SessionRename>(
+    exchange::<SessionSet>(
         26,
-        SessionRenameParams {
+        SessionSetParams {
             session_id: SID.into(),
-            title: "Typo hunt".into(),
+            title: Some("Typo hunt".into()),
+            pinned: Some(true),
+            ..Default::default()
         },
         SessionInfo {
             title: Some("Typo hunt".into()),
+            pinned: true,
             ..info()
         },
     );
@@ -731,6 +741,10 @@ fn events() {
         outcome: TurnOutcome::Failed {
             message: "HTTP 500: overloaded".into(),
         },
+        timing: Some(TurnTiming {
+            started_at: 1_700_000_000_000,
+            duration_ms: 4200,
+        }),
     });
     event::<ModelDeltaEvent>(ModelDeltaParams {
         request_id: 7,
@@ -788,6 +802,10 @@ fn events() {
     });
     event::<SessionDeleted>(SessionRef {
         session_id: SID.into(),
+    });
+    event::<SessionChanged>(SessionInfo {
+        archived: true,
+        ..info()
     });
     event::<SessionUpdated>(SessionUpdatedParams {
         session_id: SID.into(),

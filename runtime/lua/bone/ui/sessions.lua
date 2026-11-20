@@ -570,7 +570,7 @@ end
 
 chats.watch(function(kind, ev)
   local open = panel and panel:is_open()
-  if kind == "archived" or kind == "pinned" or kind == "attention" or kind == "folded" then
+  if kind == "attention" or kind == "folded" then
     -- Only the sections change (a waiting question moves its chat to
     -- Active; a header folds): nothing to fetch.
     if state then state.filter_dirty = true end

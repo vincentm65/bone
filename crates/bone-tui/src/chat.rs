@@ -88,8 +88,7 @@ mod tests {
             cwd: "/".into(),
             created_at: 0,
             title: Some("t".into()),
-            parent: None,
-            owner: None,
+            ..Default::default()
         };
         c.load(
             info,
