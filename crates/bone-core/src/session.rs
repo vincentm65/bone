@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bone_proto::methods::{QueueMode, QueuedMessage};
-use bone_proto::types::{ChatMessage, SessionId, SessionInfo, SessionOwner, ToolTiming, TurnId};
+use bone_proto::types::{
+    ChatMessage, SessionId, SessionInfo, SessionOwner, ToolTiming, TurnId, TurnTiming,
+};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +51,19 @@ pub(crate) enum Record {
     Title(String),
     Pinned(bool),
     Archived(bool),
+    /// When a turn ran. Not part of the transcript.
+    Turn(TurnEnd),
+}
+
+/// A finished turn's times, with the transcript's length and user messages
+/// when it ended: the second numbers the turn, the first says whether a
+/// later checkpoint kept it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TurnEnd {
+    pub messages: usize,
+    pub turn: usize,
+    #[serde(flatten)]
+    pub timing: TurnTiming,
 }
 
 /// A provider entry (`None`: the env-configured one) and model.
@@ -152,6 +167,8 @@ pub struct Session {
     pub model: Option<Pin>,
     /// When its tool calls ran, by call id (those recorded with times).
     pub tool_times: BTreeMap<String, ToolTiming>,
+    /// When its finished turns ran, in order.
+    pub turn_ends: Vec<TurnEnd>,
     /// The client that last sent it a message (`bone-tui`, `bone-gui`…),
     /// as the server names it; not kept.
     pub client: Option<String>,
@@ -204,6 +221,8 @@ pub struct ActiveTurn {
     /// Messages sent after the turn was cancelled (they lead the queue).
     /// Any at all and the queue goes on afterwards instead of pausing.
     pub after_cancel: usize,
+    /// When its user message was saved (Unix ms); `None` until then.
+    pub started_at: Option<u64>,
 }
 
 impl Session {
@@ -234,6 +253,22 @@ impl Session {
         }
         let written = write_line(&mut self.file, Record::Message(msg.clone()), Some(timing));
         self.messages.push(msg);
+        self.reindex();
+        written
+    }
+
+    /// Keep when a turn ran (in the file, not the transcript).
+    pub fn turn_ended(&mut self, timing: TurnTiming) -> std::io::Result<()> {
+        let turn = (self.messages.iter())
+            .filter(|m| matches!(m, ChatMessage::User { .. }))
+            .count();
+        let end = TurnEnd {
+            messages: self.messages.len(),
+            turn,
+            timing,
+        };
+        self.turn_ends.push(end.clone());
+        let written = write_record(&mut self.file, Record::Turn(end));
         self.reindex();
         written
     }
@@ -360,6 +395,8 @@ impl Session {
         // disk, not only in the page cache, before going on.
         let written = write_record(&mut self.file, Record::Compact(messages.clone()))
             .and_then(|()| self.file.sync_data());
+        let kept = same_start(&self.messages, &messages);
+        self.turn_ends.retain(|t| t.messages <= kept);
         self.messages = messages;
         self.summary = None;
         // Their places in the old transcript mean nothing in this one.
@@ -554,6 +591,7 @@ impl SessionStore {
             users,
             model,
             tool_times,
+            turn_ends,
             moves,
         } = match read_file(&path, usize::MAX) {
             Ok(r) => r,
@@ -571,6 +609,7 @@ impl SessionStore {
         // too), so they stay unique across reloads.
         let session = self.open(info, messages, summary, model, users, file);
         session.lock().unwrap().tool_times = tool_times;
+        session.lock().unwrap().turn_ends = turn_ends;
         session.lock().unwrap().moves = moves;
         Ok(self.keep(id, session))
     }
@@ -622,6 +661,7 @@ impl SessionStore {
             safe_point: false,
             model,
             tool_times: BTreeMap::new(),
+            turn_ends: Vec::new(),
             client: None,
             moves: Vec::new(),
             next_turn: users as TurnId,
@@ -786,6 +826,7 @@ struct Loaded {
     users: usize,
     model: Option<Pin>,
     tool_times: BTreeMap<String, ToolTiming>,
+    turn_ends: Vec<TurnEnd>,
     moves: Vec<Move>,
 }
 
@@ -818,6 +859,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         users: 0,
         model: None,
         tool_times: BTreeMap::new(),
+        turn_ends: Vec::new(),
         moves: Vec::new(),
     };
     // Bytes, not a String: a line of binary garbage must not fail the read.
@@ -855,7 +897,10 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                     }
                 }
             }
+            Ok(Record::Turn(end)) => loaded.turn_ends.push(end),
             Ok(Record::Compact(messages)) => {
+                let kept = same_start(&loaded.messages, &messages);
+                loaded.turn_ends.retain(|t| t.messages <= kept);
                 loaded.messages = messages;
                 loaded.summary = None;
                 loaded.moves.clear();
@@ -880,6 +925,11 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         }
     }
     Ok(loaded)
+}
+
+/// How many messages two transcripts start with alike.
+fn same_start(a: &[ChatMessage], b: &[ChatMessage]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
 /// What a `session/set` record says about the session.

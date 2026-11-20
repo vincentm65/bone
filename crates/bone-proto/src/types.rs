@@ -70,6 +70,14 @@ pub struct ToolTiming {
     pub generation_ms: Option<u64>,
 }
 
+/// When a turn ran: Unix milliseconds its user message was saved, and how
+/// long it went on from there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnTiming {
+    pub started_at: u64,
+    pub duration_ms: u64,
+}
+
 /// Reasoning a provider returns sealed (OpenAI's encrypted reasoning items),
 /// replayed on later calls so the model keeps its thinking. Only the model
 /// that wrote it can read it.

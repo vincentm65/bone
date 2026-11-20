@@ -57,6 +57,12 @@
           "generation_ms": 800,
           "started_at": 1700000000000
         }
+      },
+      "turn_times": {
+        "1": {
+          "duration_ms": 3600,
+          "started_at": 1700000000000
+        }
       }
     }
   }

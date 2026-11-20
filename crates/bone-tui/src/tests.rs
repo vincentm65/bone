@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use bone_proto::client::{Client, EventStream};
 use bone_proto::methods::*;
-use bone_proto::types::{ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, Usage};
+use bone_proto::types::{
+    ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, TurnTiming, Usage,
+};
 use bone_proto::{Message, Notification, RpcError, transport};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -129,6 +131,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 { "role": "user", "content": "old question" },
                 { "role": "assistant", "content": "old answer" },
             ],
+            "turn_times": { "1": { "started_at": 1700000000000u64, "duration_ms": 65000 } },
         }),
         _ => Value::Null,
     })
@@ -361,6 +364,7 @@ fn finished(session: &str, outcome: TurnOutcome) -> TurnFinishedParams {
         session_id: session.into(),
         turn_id: 1,
         outcome,
+        timing: None,
     }
 }
 

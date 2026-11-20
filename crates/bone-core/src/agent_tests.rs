@@ -2669,7 +2669,18 @@ async fn tool_events_carry_timing_and_live_output() {
         "{:?}",
         finished.duration_ms
     );
-    h.until::<TurnFinished>().await;
+    // The turn is timed too, and kept with the session as turn 1.
+    let timing = h.until::<TurnFinished>().await.timing.unwrap();
+    assert!(timing.duration_ms >= finished.duration_ms.unwrap());
+    let all = SessionMessagesParams {
+        session_id: h.session_id.clone(),
+        tail: None,
+    };
+    let loaded = h.call::<SessionMessages>(all).await.unwrap();
+    assert_eq!(loaded.turn_times, [(1, timing)].into());
+    let fresh = crate::session::SessionStore::new(h._data.path());
+    let s = fresh.get(&h.session_id).unwrap();
+    assert_eq!(s.lock().unwrap().turn_ends[0].timing, timing);
 }
 
 #[tokio::test]

@@ -18,7 +18,8 @@ use bone_proto::methods::{
     TurnFinished, TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{
-    ChatMessage, DeltaKind, ReasoningState, ToolCall, ToolTiming, TurnId, TurnOutcome, Usage,
+    ChatMessage, DeltaKind, ReasoningState, ToolCall, ToolTiming, TurnId, TurnOutcome, TurnTiming,
+    Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -125,14 +126,20 @@ pub(crate) async fn run_turn(
             TurnOutcome::Failed { message }
         }
     };
-    let resumed = {
+    let (resumed, timing) = {
         let mut s = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.safe_point = false;
         s.last_outcome = Some((turn_id, outcome.clone()));
-        match s.active.take_if(|a| a.turn_id == turn_id) {
-            Some(a) => a.after_cancel > 0,
-            None => false,
+        let active = s.active.take_if(|a| a.turn_id == turn_id);
+        // Timed from its user message: a turn refused before it has none.
+        let timing = (active.as_ref().and_then(|a| a.started_at)).map(|started_at| TurnTiming {
+            started_at,
+            duration_ms: unix_ms().saturating_sub(started_at),
+        });
+        if let Some(t) = timing {
+            let _ = s.turn_ended(t);
         }
+        (active.is_some_and(|a| a.after_cancel > 0), timing)
     };
     let cancelled = matches!(outcome, TurnOutcome::Cancelled);
     let ev = json!({ "session_id": turn.session_id, "turn_id": turn_id, "outcome": outcome });
@@ -164,6 +171,7 @@ pub(crate) async fn run_turn(
         session_id: turn.session_id,
         turn_id,
         outcome,
+        timing,
     });
     // Then the next queued message, if any.
     inner.after_turn(&session, cancelled && !resumed);
@@ -334,6 +342,11 @@ impl Turn<'_> {
             images: images.clone(),
             source: source.clone(),
         })?;
+        if let Some(a) =
+            (self.session.lock().unwrap().active.as_mut()).filter(|a| a.turn_id == self.turn_id)
+        {
+            a.started_at = Some(unix_ms());
+        }
         if !self.inner.mcp.is_empty() {
             self.inner.mcp.ensure_ready(MCP_WAIT).await;
         }

@@ -224,6 +224,14 @@ fn requests() {
                 },
             )]
             .into(),
+            turn_times: [(
+                1,
+                TurnTiming {
+                    started_at: 1_700_000_000_000,
+                    duration_ms: 3600,
+                },
+            )]
+            .into(),
         },
     );
     exchange::<AttachmentUpload>(
@@ -733,6 +741,10 @@ fn events() {
         outcome: TurnOutcome::Failed {
             message: "HTTP 500: overloaded".into(),
         },
+        timing: Some(TurnTiming {
+            started_at: 1_700_000_000_000,
+            duration_ms: 4200,
+        }),
     });
     event::<ModelDeltaEvent>(ModelDeltaParams {
         request_id: 7,

@@ -237,8 +237,8 @@ impl Index {
                     continue;
                 };
                 let at = line.at.unwrap_or(last_at);
-                // Only messages are activity (not a rename or a pin).
-                if matches!(line.record, Record::Message(_)) {
+                // Only messages and turns are activity (not a rename or a pin).
+                if matches!(line.record, Record::Message(_) | Record::Turn(_)) {
                     last_at = last_at.max(at);
                 }
                 index_record(&tx, id, line.record, at, &mut seq)?;
@@ -423,7 +423,7 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
             ],
         )
         .and_then(|()| run("UPDATE sessions SET root = coalesce((SELECT root FROM sessions WHERE id = ?1), ?1) WHERE root = ?1", params![id])),
-        Record::Compact(_) | Record::Summary(_) | Record::Model(_) => Ok(()),
+        Record::Compact(_) | Record::Summary(_) | Record::Model(_) | Record::Turn(_) => Ok(()),
         Record::Cwd(cwd) => run("UPDATE sessions SET cwd = ?2 WHERE id = ?1", params![id, cwd]),
         Record::Title(t) => run("UPDATE sessions SET renamed = ?2 WHERE id = ?1", params![id, t]),
         Record::Pinned(on) => run("UPDATE sessions SET pinned = ?2 WHERE id = ?1", params![id, on]),

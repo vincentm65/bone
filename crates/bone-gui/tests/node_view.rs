@@ -238,6 +238,7 @@ async fn switching_chats_keeps_each_scroll_position() {
                 session_id: name.into(),
                 turn_id: turn,
                 outcome: TurnOutcome::Completed,
+                timing: None,
             });
         }
     };

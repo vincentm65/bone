@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::types::{
     AskId, ChatMessage, DeltaKind, SessionId, SessionInfo, ToolCall, ToolTiming, TurnId,
-    TurnOutcome, Usage,
+    TurnOutcome, TurnTiming, Usage,
 };
 
 /// The lifecycle state of a managed shell process.
@@ -355,6 +355,10 @@ pub struct SessionMessagesResult {
     /// with their results (not calls from before cores kept times).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_times: BTreeMap<String, ToolTiming>,
+    /// When the finished turns in `messages` ran, by turn number: that of
+    /// the last user message before each ended (omitted ones counted).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turn_times: BTreeMap<usize, TurnTiming>,
 }
 
 method!(
@@ -1139,6 +1143,9 @@ pub struct TurnFinishedParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub outcome: TurnOutcome,
+    /// When it ran, if it got as far as saving its user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TurnTiming>,
 }
 
 // ---- Store -----------------------------------------------------------------

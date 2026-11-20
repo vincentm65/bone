@@ -155,6 +155,7 @@ impl Inner {
                 cancel: cancel.clone(),
                 closing: false,
                 after_cancel: 0,
+                started_at: None,
             });
             // Running again takes it out of the archive.
             if s.set(None, None, Some(false)).unwrap_or(false) {
@@ -1213,14 +1214,19 @@ impl Core {
                 _ => None,
             })
             .collect();
+        let omitted_turns = s.messages[..from].iter().filter(|m| is_user(m)).count();
+        let turn_times = (s.turn_ends.iter().filter(|t| t.turn > omitted_turns))
+            .map(|t| (t.turn, t.timing))
+            .collect();
         Ok(SessionMessagesResult {
             queue: s.queue.clone(),
             queue_paused: s.queue_paused,
             info: s.info.clone(),
             messages: s.messages[from..].to_vec(),
             active_turn: s.active.as_ref().map(|a| a.turn_id),
-            omitted_turns: s.messages[..from].iter().filter(|m| is_user(m)).count(),
+            omitted_turns,
             tool_times,
+            turn_times,
         })
     }
 

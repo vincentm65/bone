@@ -131,7 +131,14 @@ impl<'a, L> Indexed<'a, L> {
             .take(f.first.unwrap_or(usize::MAX))
             .map(|n| {
                 let mut d = self.chat.item_data(self.items[n], n + 1, f.full);
-                d["turn"] = json!(self.turns[n]);
+                let turn = self.turns[n];
+                // A user message says when its turn ran, once it ended.
+                let ran = self.chat.turn_times.get(&turn);
+                if let Some(t) = ran.filter(|_| self.items[n].part == Part::User) {
+                    d["started_at"] = json!(t.started_at);
+                    d["duration_ms"] = json!(t.duration_ms);
+                }
+                d["turn"] = json!(turn);
                 d
             })
             .collect()
