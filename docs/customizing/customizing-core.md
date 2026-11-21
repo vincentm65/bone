@@ -17,6 +17,7 @@ tools, `scripting.rs` the Lua bridge). Built-in tools the model already has:
 bone.config.providers.qwen = {
   base_url = "http://localhost:8081/v1",  -- any OpenAI-compatible /chat/completions
   model = "Qwen3.8-27B-exl3-3.8bpw",
+  models = { "Qwen3.8-27B-exl3-3.8bpw", "Qwen3.8-Flash" }, -- optional: to switch between
   api_key = os.getenv("SOME_KEY"),        -- optional
   reasoning_effort = "medium",            -- optional
   stream_usage = true,                    -- send stream_options.include_usage
@@ -24,6 +25,11 @@ bone.config.providers.qwen = {
 bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id, client }
 ```
+
+`models` lists the provider's models the apps switch between (`/model` picks
+one, `alt+m` moves to the next); `model` is the one in use, and it is always
+in the list. `/model NAME` adds a model to it, saved as
+`providers.<name>.models` in settings.
 
 Over Chat Completions, once the model streams reasoning (in `reasoning_content`
 or `reasoning`), bone sends each assistant message's reasoning back in that
