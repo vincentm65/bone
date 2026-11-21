@@ -153,7 +153,13 @@ local function compute(fresh)
     end
     st.sel = first or st.sel
   end
-  st.version = st.version + 1
+  -- The list's key changes only when its rows do (which, in what order).
+  -- A running chat's clock makes them again each second, and a new key
+  -- under a press makes new rows there: the click would be lost.
+  local shape = {}
+  for i, r in ipairs(rows) do shape[i] = r.kind .. ":" .. tostring(r.id or r.section or r.title or r.text) end
+  shape = table.concat(shape, "\n")
+  if shape ~= st.shape then st.shape, st.version = shape, st.version + 1 end
   st.minute = math.floor(os.time() / 60)
   st.window = chats.recent_window()
 end
