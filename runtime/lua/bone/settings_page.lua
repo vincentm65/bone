@@ -219,7 +219,7 @@ function M.new(want, opts)
     local key_text = st.keys[pv.name] and "saved" or (env ~= "" and ("from $" .. env)) or (p.has_key and "set in core.lua") or "none"
     local out = {
       { kind = "pfield", key = "model", label = "Model", type = "string", value = p.model, changed = changed("model") },
-      { kind = "pfield", key = "models", label = "Models", type = "string", value = table.concat(p.models or { p.model }, ", "),
+      { kind = "pfield", key = "models", label = "Models", type = "string", value = table.concat(p.models or {}, ", "),
         changed = changed("models"), desc = "the models /model and alt+m switch between, by commas; empty: core.lua's" },
       { kind = "pfield", key = "base_url", label = "URL", type = "string", value = p.base_url, changed = changed("base_url") },
       { kind = "pfield", key = "type", label = "Type", type = "string", value = p.type or "", changed = changed("type"),
@@ -499,19 +499,10 @@ function M.new(want, opts)
       load_providers()
       saved_note(err, "saved " .. row.label:lower())
     end
-    if row.key == "models" and value ~= "" then
+    if row.key == "models" then
       local list = {}
-      for m in tostring(value):gmatch("[^,%s]+") do
-        local seen = false
-        for _, x in ipairs(list) do seen = seen or x == m end
-        if not seen then list[#list + 1] = m end
-      end
+      for m in tostring(value):gmatch("[^,%s]+") do list[#list + 1] = m end
       value = #list > 0 and list or ""
-    elseif row.key == "model" and value ~= "" then
-      -- A new model joins the provider's list, beside the one it replaces.
-      return require("bone.models").add(name, value, function()
-        bone.settings.set(path, value, after)
-      end)
     end
     if value == "on" or value == "off" then
       value = value == "on"

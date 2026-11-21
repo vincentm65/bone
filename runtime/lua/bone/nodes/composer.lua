@@ -129,7 +129,7 @@ local function toolbar(opts, running, empty)
   -- the toolbar is a row of bare controls, not a row of bubbles); the wheel
   -- over it goes round the provider's models.
   if u.model and u.model ~= "" and not compact then
-    local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
+    local name = require("bone.models").label(u.provider, u.model)
     local button = style.finish({
       direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8 }, radius = style.radius.md,
       shrink = 1, min_width = 56, label = "Model: " .. name, id = not opts.chat and "composer-model" or nil,
