@@ -1208,8 +1208,12 @@ impl State {
                     let streams = self.streams.clone();
                     let host = self.host.clone();
                     let calling = session_id.clone();
+                    // Listening starts now, before any other Lua runs.
+                    let queue = self.host.queue_wait(&spec);
                     let task = self.rt.spawn(async move {
-                        let result = if let Some(r) = host.mcp_wait(&spec).await {
+                        let result = if let Some(wait) = queue {
+                            wait.await
+                        } else if let Some(r) = host.mcp_wait(&spec).await {
                             r
                         } else if let Some(r) = host.session_wait(&spec).await {
                             r

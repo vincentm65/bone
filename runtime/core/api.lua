@@ -253,6 +253,8 @@ end
 
 ---   bone.queue.list(id)              { { id, text, mode, created_at } }
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
+---   bone.queue.wait(id, ms)          wait until the queue changes or ms pass:
+---                                     true, or nil if the turn was cancelled
 bone.queue = {
   add = function(id, text, mode, images, source)
     local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer", images = images or {}, source = source })
@@ -269,6 +271,13 @@ bone.queue = {
   end,
   clear = function(id)
     return session_op("queue_clear", id)
+  end,
+  wait = function(id, ms)
+    if not in_job() then
+      error("bone.queue.wait only works inside hooks, tools and providers", 2)
+    end
+    assert(type(id) == "string" and type(ms) == "number", "bone.queue.wait(id, ms)")
+    return wait({ queue_wait = { id = id, ms = math.max(0, math.floor(ms)) } })
   end,
 }
 

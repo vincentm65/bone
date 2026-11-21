@@ -361,7 +361,7 @@ bone.session.cd(id, "../other-project")   -- move an idle session; its tools run
 
 `bone.session.create({ cwd, messages, summary, model })` also accepts an initial transcript: message entries may be tables or exact JSON strings from `snapshot.raw_messages`. Images and summary bounds are validated before creating the session; user-message counts initialize turn numbering. The `session/created` event is emitted after initialization. There is no source-session or branching policy in this API: plugins choose what to copy and store their own genealogy.
 
-The message queue is open to Lua too: `bone.queue.add(id, text, mode, images)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
+The message queue is open to Lua too: `bone.queue.add(id, text, mode, images)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods. `bone.queue.wait(id, ms)` waits until that queue changes or `ms` pass (true, or nil when the turn is cancelled), so a loop that watches for messages wakes the moment one is queued instead of polling.
 
 Sessions of their own, for sub-agents:
 
