@@ -27,19 +27,37 @@ local function load_total(key, legacy)
   end)
 end
 
+-- The saved provider, for a new chat (no session yet) so the model and
+-- effort controls can draw before model/list comes back.
+local function configured()
+  local provider = bone.settings.get("provider")
+  if type(provider) ~= "string" or provider == "" then return nil end
+  local model = bone.settings.get("providers." .. provider .. ".model")
+  if type(model) ~= "string" or model == "" then return nil end
+  return provider, model
+end
+
 -- Sessions keep their own model: ask the core for each one's.
 local function load_model(key)
   bone.request("model/list", { session_id = key ~= "" and key or nil }, function(list)
+    local info = state.info[key]
+    if not info then return end
+    local changed = false
     for _, model in ipairs(list or {}) do
       if model.current then
-        state.info[key].model = model.model or model.name
-        state.info[key].provider = model.name
+        local name = model.model or model.name
         -- What the core actually compacts at: the provider's own limit, or
         -- compact.limit when it sets none (0 still means "never").
-        state.info[key].limit = tonumber(model.compact_limit) or tonumber(bone.settings.get("compact.limit"))
+        local limit = tonumber(model.compact_limit) or tonumber(bone.settings.get("compact.limit"))
+        if info.model ~= name or info.provider ~= model.name or info.limit ~= limit then
+          info.model, info.provider, info.limit = name, model.name, limit
+          changed = true
+        end
         break
       end
     end
+    -- A new chat paints before this returns; redraw once the model is known.
+    if changed and bone.gui and bone.gui.invalidate then bone.gui.invalidate() end
   end)
 end
 
@@ -50,7 +68,14 @@ function M.of(session_id)
   local key = session_id or ""
   if not state.info[key] then
     state.info[key] = { input = 0, output = 0, cached = 0, curr = 0 }
-    if key ~= "" then load_total(key) end
+    if key == "" then
+      local provider, model = configured()
+      if provider then
+        state.info[key].provider, state.info[key].model = provider, model
+      end
+    else
+      load_total(key)
+    end
     load_model(key)
   end
   return state.info[key]
