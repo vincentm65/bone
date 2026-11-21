@@ -115,26 +115,29 @@ impl Runtime {
         let mut out: Vec<ModelInfo> = self
             .models
             .iter()
-            .map(|(name, p)| ModelInfo {
-                supports_images: p.supports_images,
-                compact_limit: p.compact_limit,
-                name: name.clone(),
-                model: (if selected.as_ref() == Some(name) {
+            .map(|(name, p)| {
+                let shown = if selected.as_ref() == Some(name) {
                     &model
                 } else {
                     &p.model
-                })
-                .clone(),
-                kind: p.kind.clone(),
-                current: selected.as_ref() == Some(name),
-                base_url: p.base_url.clone(),
-                reasoning_effort: p.reasoning_effort.clone(),
-                stream_usage: p.stream_usage,
-                replay_reasoning: p.replay_reasoning,
-                api: crate::provider::api(p),
-                api_auto: p.api.is_none(),
-                has_key: p.api_key.is_some(),
-                added: self.settings_providers.contains(name),
+                };
+                ModelInfo {
+                    supports_images: p.supports_images,
+                    compact_limit: p.compact_limit,
+                    name: name.clone(),
+                    model: shown.clone(),
+                    models: model_choices(&p.models, &[&p.model, shown]),
+                    kind: p.kind.clone(),
+                    current: selected.as_ref() == Some(name),
+                    base_url: p.base_url.clone(),
+                    reasoning_effort: p.reasoning_effort.clone(),
+                    stream_usage: p.stream_usage,
+                    replay_reasoning: p.replay_reasoning,
+                    api: crate::provider::api(p),
+                    api_auto: p.api.is_none(),
+                    has_key: p.api_key.is_some(),
+                    added: self.settings_providers.contains(name),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1041,6 +1044,24 @@ impl Inner {
         );
         out
     }
+}
+
+/// A provider's models to switch between: its `models` list, each once, with
+/// `always` (the model in use, the provider's default) put in front when the
+/// list leaves them out.
+fn model_choices(models: &[String], always: &[&String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(models.len() + always.len());
+    for m in models {
+        if !m.is_empty() && !out.contains(m) {
+            out.push(m.clone());
+        }
+    }
+    for m in always.iter().rev() {
+        if !m.is_empty() && !out.contains(m) {
+            out.insert(0, (*m).clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

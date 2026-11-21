@@ -766,6 +766,10 @@ pub struct ModelInfo {
     /// The key in `bone.config.providers`.
     pub name: String,
     pub model: String,
+    /// The models to switch between: the provider's `models`, with `model`
+    /// (and the provider's own default) always among them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// The Lua provider type, if it is one.
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,

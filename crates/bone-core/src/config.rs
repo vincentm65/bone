@@ -76,6 +76,10 @@ pub struct ProviderConfig {
     #[serde(skip)]
     pub options: serde_json::Value,
     pub model: String,
+    /// Other models of this provider to switch between (`model` is the one
+    /// in use): the app's model picker and its next-model key.
+    #[serde(default, deserialize_with = "string_list")]
+    pub models: Vec<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -115,4 +119,16 @@ impl Default for ProviderConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// A list of strings; also `null` or `{}`, which is how Lua hands over an
+/// empty table.
+fn string_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    use serde::de::Error;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Object(o) if o.is_empty() => Ok(Vec::new()),
+        v => serde_json::from_value(v)
+            .map_err(|_| D::Error::custom("models is a list of model names")),
+    }
 }

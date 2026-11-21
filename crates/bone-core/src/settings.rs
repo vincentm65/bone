@@ -106,6 +106,11 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     ))
                 } else if p.get("replay_reasoning").is_some_and(|v| !v.is_boolean()) {
                     Err(format!("{path}: replay_reasoning must be a boolean"))
+                } else if p
+                    .get("models")
+                    .is_some_and(|v| !v.is_null() && !is_models(v))
+                {
+                    Err(format!("{path}: {MODELS}"))
                 } else if let Some(api) = p.get("api").filter(|v| !v.is_null())
                     && !is_api(api)
                 {
@@ -154,6 +159,8 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
             ("headers" | "body", v) => extra(field, v).map_err(|e| format!("{path}: {e}")),
             ("api", v) if is_api(v) => Ok(()),
             ("api", _) => Err(format!("{path}: {API}")),
+            ("models", v) if is_models(v) => Ok(()),
+            ("models", _) => Err(format!("{path}: {MODELS}")),
             ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
             (
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage"
@@ -161,7 +168,7 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning, supports_images, compact_limit, headers, body, and for Anthropic cache"
+                "{path}: a provider's settings are base_url, model, models, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning, supports_images, compact_limit, headers, body, and for Anthropic cache"
             )),
         },
         _ => Ok(()),
@@ -169,6 +176,16 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
 }
 
 const API: &str = "api is \"completions\", \"responses\" or \"anthropic\"";
+const MODELS: &str = "models is a list of model names";
+
+/// `models`: model names, each once.
+fn is_models(v: &Value) -> bool {
+    v.as_array().is_some_and(|a| {
+        a.iter()
+            .enumerate()
+            .all(|(i, m)| m.as_str().is_some_and(|m| !m.trim().is_empty()) && !a[..i].contains(m))
+    })
+}
 
 /// `headers`: an object of strings; `body`: an object.
 fn extra(key: &str, v: &Value) -> Result<(), String> {
@@ -370,5 +387,30 @@ mod tests {
         );
         set(&mut s, "providers.qwen.replay_reasoning", Value::Null).unwrap();
         assert_eq!(s, json!({}));
+    }
+
+    #[test]
+    fn model_list_validation() {
+        let mut s = json!({});
+        set(&mut s, "providers.qwen.models", json!(["a", "b"])).unwrap();
+        assert_eq!(get(&s, "providers.qwen.models"), Some(&json!(["a", "b"])));
+        let bad = [json!("a"), json!([1]), json!(["a", "a"]), json!([""]), json!({})];
+        for bad in bad {
+            assert!(validate("providers.qwen.models", &bad).is_err(), "{bad}");
+        }
+        assert!(
+            validate(
+                "providers.qwen",
+                &json!({ "base_url": "http://local/v1", "model": "m", "models": ["m", "n"] })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "providers.qwen",
+                &json!({ "base_url": "http://local/v1", "model": "m", "models": [true] })
+            )
+            .is_err()
+        );
     }
 }

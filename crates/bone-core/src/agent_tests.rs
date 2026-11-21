@@ -2842,6 +2842,72 @@ async fn core_plugins_switched_off_in_settings_stay_off() {
 }
 
 #[tokio::test]
+async fn providers_list_models_to_switch_between() {
+    let h = Harness::with_lua(
+        r#"bone.config.providers.y = { base_url = "http://unused", model = "y1", models = { "y2", "y1", "y2" } }
+           bone.config.providers.z = { base_url = "http://unused", model = "z1", models = {} }
+           bone.config.provider = "y""#,
+        vec![],
+    )
+    .await;
+    let models = |h: &Harness, name: &str| -> Vec<String> {
+        let list = h.core.inner.runtime().model_list(None);
+        list.into_iter().find(|m| m.name == name).unwrap().models
+    };
+    async fn set(h: &Harness, path: &str, value: Value) -> Result<Value, RpcError> {
+        h.core
+            .handle(
+                SettingsSet::METHOD,
+                Some(json!({ "path": path, "value": value })),
+            )
+            .await
+    }
+    // core.lua's list, each name once; Lua's empty table is no list; the
+    // model in use is always one of them.
+    assert_eq!(models(&h, "y"), ["y2", "y1"]);
+    assert_eq!(models(&h, "z"), ["z1"]);
+    assert_eq!(models(&h, "x"), ["m"]);
+
+    // settings.json's list replaces it; a model it leaves out goes first.
+    set(&h, "providers.y.models", json!(["a", "b"])).await.unwrap();
+    assert_eq!(models(&h, "y"), ["y1", "a", "b"]);
+    set(&h, "providers.y.model", json!("b")).await.unwrap();
+    assert_eq!(models(&h, "y"), ["a", "b"]);
+    for bad in [json!("a"), json!([1]), json!(["a", "a"]), json!([" "])] {
+        let e = set(&h, "providers.y.models", bad.clone()).await.unwrap_err();
+        assert!(e.message.contains("list of model names"), "{bad}: {e:?}");
+    }
+    // A session keeps its model when the default moves on: both are listed.
+    let pinned = h
+        .core
+        .inner
+        .runtime()
+        .model_list(Some((Some("y".into()), "old".into())));
+    let y = pinned.iter().find(|m| m.name == "y").unwrap();
+    assert_eq!((y.model.as_str(), &y.models[..]), ("old", &["old", "a", "b"].map(String::from)[..]));
+    // Removing the setting goes back to core.lua's list.
+    set(&h, "providers.y.models", Value::Null).await.unwrap();
+    assert_eq!(models(&h, "y"), ["b", "y2", "y1"]);
+    // A provider added in the app can carry a list too.
+    set(
+        &h,
+        "providers.w",
+        json!({ "base_url": "http://w/v1", "model": "w1", "models": ["w1", "w2"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(models(&h, "w"), ["w1", "w2"]);
+    let e = set(
+        &h,
+        "providers.v",
+        json!({ "base_url": "http://v/v1", "model": "v1", "models": "v2" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.message.contains("list of model names"), "{e:?}");
+}
+
+#[tokio::test]
 async fn providers_and_keys_from_settings_and_secrets() {
     let h = Harness::with_lua("", vec![]).await;
     async fn set_on(core: &Core, path: &str, value: Value) -> Result<Value, RpcError> {
