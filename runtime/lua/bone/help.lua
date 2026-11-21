@@ -100,6 +100,7 @@ M.KEYS = {
   { "pageup / pagedown", "scroll the conversation or command suggestions", "Reading" },
   { "shift+up / shift+down / wheel", "scroll the conversation or command suggestions", "Reading" },
   { "ctrl+home / ctrl+end", "jump to the top or bottom; bottom follows new output", "Reading" },
+  { "alt+m", "switch to the provider's next model (/model lists them)", "Messaging" },
   { "ctrl+r", "show or hide model reasoning", "Reading" },
   { "ctrl+t", "cycle tool detail: summary, rows, full", "Reading" },
   { "mouse drag", "select text; release to copy to the clipboard", "Reading" },

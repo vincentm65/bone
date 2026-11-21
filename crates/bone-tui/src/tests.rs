@@ -4890,6 +4890,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     assert_eq!(top(&screen), config_top);
     for row in [
         "› Model",
+        "Models",
         "URL",
         "Type",
         "Reasoning effort",
@@ -4907,7 +4908,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         last_set(&h),
         json!({ "path": "providers.ds.model", "value": "d2" })
     );
-    h.input("{down}{down}{down}").await;
+    h.input("{down}{down}{down}{down}").await;
     let screen = h.screen(100, 34);
     let y = screen
         .lines()
@@ -4944,7 +4945,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         h.requests("secrets/set").last().unwrap(),
         &json!({ "provider": "ds", "key": "sk-9" })
     );
-    h.input("{up}{up}{up}{up}{up}{up}r").await; // reset the model to core.lua's
+    h.input("{up}{up}{up}{up}{up}{up}{up}r").await; // reset the model to core.lua's
     assert_eq!(
         h.requests("settings/reset").last().unwrap(),
         &json!({ "path": "providers.ds.model" })

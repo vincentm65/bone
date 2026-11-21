@@ -1172,6 +1172,9 @@ end
 ---   opts.prompt: text before the filter ("")
 ---   opts.format: function(item) -> string (default tostring)
 ---   opts.on_choice: function(item, index), with nil if cancelled
+---   opts.create: function(query) -> label or nil: a last row that takes
+---     what was typed (none while nothing is, or when it returns nil);
+---     choosing it calls opts.on_create(query) instead of on_choice
 ---   opts.loading: show "loading…" until :set_items is called
 ---   opts.empty: what to show for an empty list
 ---   opts.footer: the hint line (false for none)
@@ -1194,13 +1197,19 @@ function bone.ui.select(items, opts)
         out[#out + 1] = { item = it, index = i, text = text }
       end
     end
+    local label = opts.create and st.query ~= "" and opts.create(st.query)
+    if label then
+      out[#out + 1] = { create = st.query, text = label }
+    end
     return out
   end
 
   local id
   local function finish(choice)
     bone.ui.close(id)
-    if opts.on_choice then
+    if choice and choice.create then
+      if opts.on_create then opts.on_create(choice.create) end
+    elseif opts.on_choice then
       if choice then
         opts.on_choice(choice.item, choice.index)
       else
