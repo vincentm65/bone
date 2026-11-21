@@ -39,6 +39,8 @@ map({
   ["ctrl+o"] = "sessions",
   ["ctrl+n"] = "new_session",
   ["ctrl+p"] = "focus_next",
+  -- The next model of the chat's provider (its list: /model).
+  ["alt+m"] = function() require("bone.models").cycle(1) end,
   ["ctrl+r"] = function()
     -- Toggle the model reasoning (live, in the chat, and in the transcript).
     -- The same switch as bone.o.apply("show_reasoning!"); it redraws on its own.

@@ -99,6 +99,18 @@ local function ring(fraction)
   }
 end
 
+-- Wheel travel over the model button not yet turned into a switch: one
+-- notch of a mouse wheel is one model, down the next and up the one before.
+local wheel = 0
+local function model_wheel(dy)
+  local notch = 50 * ((bone.o and bone.o.wheel_speed) or 1)
+  wheel = wheel + (dy or 0)
+  if math.abs(wheel) < notch then return end
+  local step = wheel > 0 and -1 or 1
+  wheel = 0
+  require("bone.models").cycle(step)
+end
+
 -- The toolbar under the field.
 local function toolbar(opts, running, empty)
   local session = opts.session
@@ -113,17 +125,21 @@ local function toolbar(opts, running, empty)
     if opts.on_focus then opts.on_focus() end
     require("bone.desktop.attach").pick()
   end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = not opts.chat and "composer-attach" or nil })
-  -- The model: a plain control that opens the provider page (no outline:
-  -- the toolbar is a row of bare controls, not a row of bubbles).
+  -- The model: a plain control that opens the model picker (no outline:
+  -- the toolbar is a row of bare controls, not a row of bubbles); the wheel
+  -- over it goes round the provider's models.
   if u.model and u.model ~= "" and not compact then
     local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
-    bar[#bar + 1] = widgets.press(style.finish({
+    local button = style.finish({
       direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8 }, radius = style.radius.md,
-      shrink = 1, min_width = 56, label = "Model: " .. name, tooltip = "Change the model (/provider)",
+      shrink = 1, min_width = 56, label = "Model: " .. name, id = not opts.chat and "composer-model" or nil,
+      tooltip = "Switch the model (/model); scroll or alt+m for the next",
+      on_scroll = model_wheel,
       icons.node("model", { size = 13, hl = "Dim" }),
       { text = name, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
       icons.node("chevron_down", { size = 12, hl = "Dim" }),
-    }), function() require("bone.config").open("providers") end)
+    })
+    bar[#bar + 1] = widgets.press(button, function() require("bone.models").pick() end)
   end
   local elapsed = statusbar.elapsed(session)
   -- A question open in this chat (any bone.ask: an approval, ask_user, a

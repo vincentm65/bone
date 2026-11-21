@@ -302,11 +302,30 @@ end, {
   aliases = { "settings" },
 })
 
--- `/model` is handled by the TUI so it can use the core's model and settings
--- requests directly. Register it here so help, completion and the command
--- menu expose it alongside the Lua commands.
-cmd("model", function() end, {
-  desc = "show or set the model for the current provider",
+-- /model: switch models (bone.models). Alone it opens the picker; with a
+-- name it moves this chat to that model of its provider and adds it to the
+-- provider's list (alt+m goes round the list); `rm NAME` takes one off.
+cmd("model", function(c)
+  local models = require("bone.models")
+  local args = c.args:gsub("^%s+", ""):gsub("%s+$", "")
+  if args == "" then return models.pick() end
+  local rm = args:match("^rm%s+(.+)$")
+  if rm then return models.remove(rm) end
+  models.use(nil, args)
+end, {
+  desc = "switch the model: alone a picker; /model NAME switches and adds it to the provider's list; /model rm NAME",
+  complete = function(ctx)
+    local argv = ctx.argv or {}
+    if argv[1] == "rm" and (#argv > 1 or (ctx.args or ""):match("%s$")) then
+      return require("bone.models").complete(argv[2] or "")
+    end
+    if #argv > 1 or (ctx.args or ""):match("%s$") then return {} end
+    local out = require("bone.models").complete(ctx.token or "")
+    if ("rm"):sub(1, #(ctx.token or "")) == (ctx.token or "") then
+      out[#out + 1] = { value = "rm", desc = "take a model off the list" }
+    end
+    return out
+  end,
 })
 
 cmd("provider", function()
