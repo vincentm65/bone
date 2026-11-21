@@ -139,6 +139,9 @@ struct Root {
     /// The title bar's parts the system acts on, from the last frame, in
     /// paint order: outermost (the drag area) first.
     controls: Vec<(WindowControl, Rect)>,
+    /// The view's zoom (`bone.o.zoom`): how many of the window's pixels
+    /// each of the view's is. Read at each frame.
+    zoom: f32,
     _subscriptions: Vec<Subscription>,
     _messages: Task<()>,
 }
@@ -190,6 +193,7 @@ impl Root {
             timer: None,
             images: HashMap::new(),
             controls: Vec::new(),
+            zoom: 1.0,
             _subscriptions: vec![quit, active],
             _messages: messages,
         }
@@ -226,14 +230,20 @@ impl Root {
 
     /// Run a frame in `bounds` and paint it.
     fn frame(&mut self, bounds: Bounds<Pixels>, hitbox: &Hitbox, window: &mut Window, cx: &mut Context<Self>) {
+        // The view lays out in its own pixels: the window's over the zoom.
+        // What comes in (the window's size, the pointer) is divided by it,
+        // what goes out (the paint, the input method's place, the title
+        // bar's parts, a size asked for) multiplied.
+        let z = self.gui.zoom();
+        self.zoom = z;
         let screen = Rect::from_xywh(
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
+            f32::from(bounds.origin.x) / z,
+            f32::from(bounds.origin.y) / z,
+            f32::from(bounds.size.width) / z,
+            f32::from(bounds.size.height) / z,
         );
         let mut input = FrameInput::new(screen);
-        input.events = std::mem::take(&mut self.events);
+        input.events = std::mem::take(&mut self.events).into_iter().map(|e| unzoom(e, z)).collect();
         input.focused = window.is_window_active();
         input.fullscreen = window.is_fullscreen();
         input.maximized = window.is_maximized();
@@ -242,7 +252,7 @@ impl Root {
         let out = self.gui.frame(input, &mut self.backend);
         self.paint(&out.draw, window);
         window.set_cursor_style(cursor(out.cursor), hitbox);
-        self.ime = out.ime;
+        self.ime = out.ime.map(|r| zoomed(r, z));
         if let Some(t) = out.copy {
             cx.write_to_clipboard(ClipboardItem::new_string(t));
         }
@@ -254,7 +264,7 @@ impl Root {
         }
         for cmd in out.window {
             match cmd {
-                WindowCmd::Size(s) => window.resize(size(px(s.x), px(s.y))),
+                WindowCmd::Size(s) => window.resize(size(px(s.x * z), px(s.y * z))),
                 WindowCmd::Fullscreen(on) => {
                     if on != window.is_fullscreen() {
                         window.toggle_fullscreen();
@@ -274,9 +284,12 @@ impl Root {
         // layouts, the caption buttons), placed by the next frame's prepaint.
         // When they move (the first frame, a resize), that frame comes at
         // once, so the system's hit test never waits on the pointer.
-        if self.gui.titlebar == Some(Titlebar::Windows) && self.controls != out.controls {
-            self.controls = out.controls.clone();
-            window.request_animation_frame();
+        if self.gui.titlebar == Some(Titlebar::Windows) {
+            let controls: Vec<_> = (out.controls.iter()).map(|(a, r)| (*a, zoomed(*r, z))).collect();
+            if self.controls != controls {
+                self.controls = controls;
+                window.request_animation_frame();
+            }
         }
         if out.close {
             cx.quit();
@@ -314,6 +327,12 @@ impl Root {
 
     fn paint(&mut self, list: &DrawList, window: &mut Window) {
         let now = Instant::now();
+        // The list is in the view's pixels; each becomes the window's here,
+        // times the zoom (these stand in for the functions of those names).
+        let z = self.zoom;
+        let px = move |v: f32| gpui::px(v * z);
+        let bounds = move |r: Rect| self::bounds(zoomed(r, z));
+        let radii = move |c: Corners| self::radii(zoomed_corners(c, z));
         for item in &list.items {
             let mask = ContentMask {
                 bounds: bounds(item.clip),
@@ -367,7 +386,7 @@ impl Root {
                     rect,
                     corners: c,
                     gradient,
-                } => paint_gradient(window, *rect, *c, gradient, o),
+                } => paint_gradient(window, zoomed(*rect, z), zoomed_corners(*c, z), gradient, o),
                 Shape::Text { at, text, color } => {
                     let Some(laid) = text.handle.downcast_ref::<Laid>() else {
                         return;
@@ -714,6 +733,52 @@ fn radii(c: Corners) -> gpui::Corners<Pixels> {
         top_right: px(c.tr),
         bottom_right: px(c.br),
         bottom_left: px(c.bl),
+    }
+}
+
+/// Box `r` of the view in the window's pixels: times the zoom `z`.
+fn zoomed(r: Rect, z: f32) -> Rect {
+    Rect::from_xywh(r.min.x * z, r.min.y * z, r.width() * z, r.height() * z)
+}
+
+fn zoomed_corners(c: Corners, z: f32) -> Corners {
+    Corners {
+        tl: c.tl * z,
+        tr: c.tr * z,
+        br: c.br * z,
+        bl: c.bl * z,
+    }
+}
+
+/// Event `e` of the window's in the view's pixels: the pointer's place, and
+/// a wheel's distance in pixels, over the zoom `z`.
+fn unzoom(e: Event, z: f32) -> Event {
+    if z == 1.0 {
+        return e;
+    }
+    match e {
+        Event::PointerMoved(p) => Event::PointerMoved(pos(p.x / z, p.y / z)),
+        Event::PointerButton {
+            pos: p,
+            button,
+            pressed,
+            mods,
+        } => Event::PointerButton {
+            pos: pos(p.x / z, p.y / z),
+            button,
+            pressed,
+            mods,
+        },
+        Event::Wheel {
+            delta,
+            unit: WheelUnit::Point,
+            mods,
+        } => Event::Wheel {
+            delta: delta * (1.0 / z),
+            unit: WheelUnit::Point,
+            mods,
+        },
+        e => e,
     }
 }
 

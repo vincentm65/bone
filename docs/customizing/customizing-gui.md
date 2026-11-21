@@ -546,6 +546,8 @@ trusted project's files, so they override those assignments. The TUI applies
 unknown saved name is ignored; a bad value of a known option is reported.
 
 ```lua
+bone.o.zoom = 1                       -- the whole window, over the system's scale (0.5–3);
+                                      -- ctrl+= and ctrl+- step it, ctrl+0 resets it
 bone.o.font = "/path/Mono.ttf"        -- the monospace font (empty: built in)
 bone.o.font_size = 14                 -- points
 bone.o.font_sans = ""                 -- proportional text (empty: the system's)
