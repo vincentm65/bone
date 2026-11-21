@@ -2873,7 +2873,7 @@ async fn providers_list_models_to_switch_between() {
     assert_eq!(models(&h, "y"), ["y1", "a", "b"]);
     set(&h, "providers.y.model", json!("b")).await.unwrap();
     assert_eq!(models(&h, "y"), ["a", "b"]);
-    for bad in [json!("a"), json!([1]), json!(["a", "a"]), json!([" "])] {
+    for bad in [json!("a"), json!([1]), json!([""]), json!([" "])] {
         let e = set(&h, "providers.y.models", bad.clone()).await.unwrap_err();
         assert!(e.message.contains("list of model names"), "{bad}: {e:?}");
     }
@@ -2905,6 +2905,55 @@ async fn providers_list_models_to_switch_between() {
     .await
     .unwrap_err();
     assert!(e.message.contains("list of model names"), "{e:?}");
+}
+
+#[tokio::test]
+async fn model_use_switches_provider_model_and_list_in_one_change() {
+    let h = Harness::with_lua(
+        r#"bone.config.providers.y = { base_url = "http://unused", model = "y1", models = { "y1", "y2" } }
+           bone.config.provider = "x""#,
+        vec![],
+    )
+    .await;
+    async fn use_model(h: &Harness, params: Value) -> Result<Value, RpcError> {
+        h.core.handle(ModelUse::METHOD, Some(params)).await
+    }
+    let saved = |h: &Harness| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(h._data.path().join("settings.json")).unwrap())
+            .unwrap()
+    };
+    // A listed model of another provider: chosen, and core.lua's list is
+    // not copied into settings.
+    use_model(&h, json!({ "provider": "y", "model": "y2" })).await.unwrap();
+    assert_eq!(
+        saved(&h),
+        json!({ "provider": "y", "providers": { "y": { "model": "y2" } } })
+    );
+    // A new model of the chosen provider joins its list.
+    use_model(&h, json!({ "model": "y3" })).await.unwrap();
+    assert_eq!(
+        saved(&h)["providers"]["y"],
+        json!({ "model": "y3", "models": ["y1", "y2", "y3"] })
+    );
+    // The session that asked moves to it, and keeps it when the default
+    // moves on.
+    let sid = h.session_id.clone();
+    use_model(&h, json!({ "session_id": sid, "model": "y1" })).await.unwrap();
+    use_model(&h, json!({ "provider": "x", "model": "m" })).await.unwrap();
+    let list = h
+        .core
+        .handle(ModelList::METHOD, Some(json!({ "session_id": sid })))
+        .await
+        .unwrap();
+    let current = list.as_array().unwrap().iter().find(|m| m["current"] == true).unwrap();
+    assert_eq!((&current["name"], &current["model"]), (&json!("y"), &json!("y1")));
+    for (bad, want) in [
+        (json!({ "provider": "nope", "model": "m" }), "no provider \"nope\""),
+        (json!({ "model": " " }), "which model?"),
+    ] {
+        let e = use_model(&h, bad).await.unwrap_err();
+        assert!(e.message.contains(want), "{e:?}");
+    }
 }
 
 #[tokio::test]

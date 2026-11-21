@@ -178,13 +178,10 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
 const API: &str = "api is \"completions\", \"responses\" or \"anthropic\"";
 const MODELS: &str = "models is a list of model names";
 
-/// `models`: model names, each once.
+/// `models`: model names (model/list gives each once).
 fn is_models(v: &Value) -> bool {
-    v.as_array().is_some_and(|a| {
-        a.iter()
-            .enumerate()
-            .all(|(i, m)| m.as_str().is_some_and(|m| !m.trim().is_empty()) && !a[..i].contains(m))
-    })
+    v.as_array()
+        .is_some_and(|a| a.iter().all(|m| m.as_str().is_some_and(|m| !m.trim().is_empty())))
 }
 
 /// `headers`: an object of strings; `body`: an object.
@@ -394,7 +391,7 @@ mod tests {
         let mut s = json!({});
         set(&mut s, "providers.qwen.models", json!(["a", "b"])).unwrap();
         assert_eq!(get(&s, "providers.qwen.models"), Some(&json!(["a", "b"])));
-        let bad = [json!("a"), json!([1]), json!(["a", "a"]), json!([""]), json!({})];
+        let bad = [json!("a"), json!([1]), json!([" "]), json!([""]), json!({})];
         for bad in bad {
             assert!(validate("providers.qwen.models", &bad).is_err(), "{bad}");
         }

@@ -1049,7 +1049,7 @@ impl Inner {
 /// A provider's models to switch between: its `models` list, each once, with
 /// `always` (the model in use, the provider's default) put in front when the
 /// list leaves them out.
-fn model_choices(models: &[String], always: &[&String]) -> Vec<String> {
+pub(crate) fn model_choices(models: &[String], always: &[&String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(models.len() + always.len());
     for m in models {
         if !m.is_empty() && !out.contains(m) {
