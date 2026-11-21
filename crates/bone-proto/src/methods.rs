@@ -181,6 +181,7 @@ pub const METHODS: &[&str] = &[
     PluginUnload::METHOD,
     PluginReload::METHOD,
     ModelList::METHOD,
+    ModelUse::METHOD,
     ModelComplete::METHOD,
     ModelCancel::METHOD,
     McpList::METHOD,
@@ -744,6 +745,23 @@ pub struct MaybeSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
 }
+method!(
+    /// Switch to `model` of `provider` (default: the session's): it becomes
+    /// the provider's model and the chosen provider, joins the provider's
+    /// `models`, and the session moves to it. One reload. Returns every
+    /// saved setting, as `settings/set` does.
+    ModelUse, "model/use", ModelUseParams => serde_json::Value
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUseParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub model: String,
+}
+
 method!(
     /// One model call outside any session (no tools are run). Returns at
     /// once; the answer arrives as [`ModelCompleted`], with

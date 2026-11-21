@@ -1,0 +1,28 @@
+[
+  {
+    "id": 20,
+    "jsonrpc": "2.0",
+    "method": "model/use",
+    "params": {
+      "model": "qwen-small",
+      "provider": "qwen",
+      "session_id": "s-1"
+    }
+  },
+  {
+    "id": 20,
+    "jsonrpc": "2.0",
+    "result": {
+      "provider": "qwen",
+      "providers": {
+        "qwen": {
+          "model": "qwen-small",
+          "models": [
+            "qwen",
+            "qwen-small"
+          ]
+        }
+      }
+    }
+  }
+]

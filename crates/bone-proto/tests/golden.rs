@@ -381,6 +381,15 @@ fn requests() {
             },
         ],
     );
+    exchange::<ModelUse>(
+        20,
+        ModelUseParams {
+            session_id: Some("s-1".into()),
+            provider: Some("qwen".into()),
+            model: "qwen-small".into(),
+        },
+        serde_json::json!({ "provider": "qwen", "providers": { "qwen": { "model": "qwen-small", "models": ["qwen", "qwen-small"] } } }),
+    );
     exchange::<ModelComplete>(
         20,
         ModelCompleteParams {

@@ -28,7 +28,7 @@ use bone_proto::methods::{
     CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall, LuaCallParams, McpAuth,
     McpAuthCode, McpAuthCodeParams, McpList, McpReconnect, McpRef, McpSignOut, ModelCancel,
     ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams, ModelDeltaEvent,
-    ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef, PluginReload,
+    ModelDeltaParams, ModelList, ModelRequest, ModelUse, ModelUseParams, PluginList, PluginLoad, PluginRef, PluginReload,
     PluginUnload, ProcessCancel, ProcessOutput, ProcessRead, ProcessRef, ProcessResize,
     ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList, ProcessesResult, QueueAdd,
     QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear, QueueMode,
@@ -536,23 +536,19 @@ impl Core {
         self.inner.reload(Change::Same).await
     }
 
-    /// Save one setting and tell every client; a provider or model change
-    /// reloads the configuration, and is undone if that fails.
-    async fn set_setting(
+    /// Save settings (each path to its value, in order) and tell every
+    /// client; a provider or model change reloads the configuration once,
+    /// and is undone if that fails.
+    async fn change_settings(
         &self,
-        path: String,
-        value: Value,
+        changes: Vec<(String, Value)>,
         session_id: Option<String>,
     ) -> Result<Value, RpcError> {
         let source = self.inner.source.as_ref().ok_or_else(|| {
             RpcError::invalid_params("this core has no config dir to save settings in")
         })?;
-        // The provider choices must name a configured provider.
-        let provider_named = match path.split_once('.') {
-            None if path == "provider" => value.as_str().map(str::to_owned),
-            _ => None,
-        };
-        if let Some(name) = provider_named {
+        // The provider choice must name a configured provider.
+        for name in changes.iter().filter(|(p, _)| p == "provider").filter_map(|(_, v)| v.as_str()) {
             let known = self.inner.runtime().model_list(None);
             if !known.iter().any(|m| m.name == name) {
                 let names: Vec<&str> = known.iter().map(|m| m.name.as_str()).collect();
@@ -571,14 +567,16 @@ impl Core {
                 RpcError::invalid_params(format!("{e}; fix or remove it before changing settings"))
             })?;
             let before = current.clone();
-            settings::set(&mut current, &path, value.clone()).map_err(RpcError::invalid_params)?;
-            // A provider added while none is chosen in settings is chosen.
-            if let Some(name) = path.strip_prefix("providers.")
-                && value.is_object()
-                && settings::get(&current, "provider").is_none()
-            {
-                settings::set(&mut current, "provider", Value::String(name.to_owned()))
-                    .map_err(RpcError::invalid_params)?;
+            for (path, value) in &changes {
+                settings::set(&mut current, path, value.clone()).map_err(RpcError::invalid_params)?;
+                // A provider added while none is chosen in settings is chosen.
+                if let Some(name) = path.strip_prefix("providers.")
+                    && value.is_object()
+                    && settings::get(&current, "provider").is_none()
+                {
+                    settings::set(&mut current, "provider", Value::String(name.to_owned()))
+                        .map_err(RpcError::invalid_params)?;
+                }
             }
             settings::save(&source.config_dir, &current).map_err(RpcError::internal)?;
             let old = std::mem::replace(&mut *guard, Ok(current.clone())).unwrap_or_default();
@@ -589,19 +587,16 @@ impl Core {
             *self.inner.settings.lock().unwrap() = Ok(before);
             return Err(RpcError::invalid_params(format!("not saved: {e}")));
         }
-        // The session that asked follows the change; the others keep theirs.
-        let model = path == "provider" || path.ends_with(".model");
-        if let Some(session) = session_id
-            .filter(|_| model)
-            .and_then(|id| self.inner.session(&id).ok())
-        {
+        // The session that asked follows a change of provider, or of its
+        // provider's model; the others keep theirs.
+        if let Some(session) = session_id.and_then(|id| self.inner.session(&id).ok()) {
             let rt = self.inner.runtime();
             let mut s = session.lock().unwrap();
             let default = rt.model_of(None, &Value::Null);
-            if path == "provider" {
+            if changes.iter().any(|(p, _)| p == "provider") {
                 s.pin(default).map_err(RpcError::internal)?;
             } else if let Some(e) = (s.model.clone().unwrap_or(default).0)
-                .filter(|e| path == format!("providers.{e}.model"))
+                .filter(|e| changes.iter().any(|(p, _)| *p == format!("providers.{e}.model")))
                 && let Some(p) = rt.models.get(&e)
             {
                 s.pin((Some(e), p.model.clone()))
@@ -615,12 +610,46 @@ impl Core {
             .unwrap()
             .clone()
             .unwrap_or_default();
-        self.inner.emit::<SettingsChanged>(SettingsChangedParams {
-            path,
-            value,
-            settings: all.clone(),
-        });
+        for (path, value) in changes {
+            self.inner.emit::<SettingsChanged>(SettingsChangedParams {
+                path,
+                value,
+                settings: all.clone(),
+            });
+        }
         Ok(all)
+    }
+
+    /// `model/use`: `model` of `provider` (default: the session's) becomes
+    /// the provider's model and the chosen provider, joins the provider's
+    /// `models`, and the session moves to it.
+    async fn use_model(&self, p: ModelUseParams) -> Result<Value, RpcError> {
+        let model = p.model.trim().to_owned();
+        let changes = {
+            let rt = self.inner.runtime();
+            let pin = (p.session_id.as_ref())
+                .and_then(|id| self.inner.session(id).ok())
+                .and_then(|s| s.lock().unwrap().model.clone());
+            let name = (p.provider.or(pin.and_then(|(e, _)| e)).or(rt.selected.clone()))
+                .ok_or_else(|| RpcError::invalid_params("no model provider is configured"))?;
+            let entry = (rt.models.get(&name))
+                .ok_or_else(|| RpcError::invalid_params(format!("no provider {name:?}")))?;
+            if model.is_empty() {
+                return Err(RpcError::invalid_params("which model?"));
+            }
+            let mut changes = vec![];
+            if entry.model != model {
+                changes.push((format!("providers.{name}.model"), Value::from(model.as_str())));
+            }
+            let mut models = runtime::model_choices(&entry.models, &[&entry.model]);
+            if !models.contains(&model) {
+                models.push(model);
+                changes.push((format!("providers.{name}.models"), Value::from(models)));
+            }
+            changes.push(("provider".to_owned(), Value::from(name)));
+            changes
+        };
+        self.change_settings(changes, p.session_id).await
     }
 
     /// Subscribe to every event emitted from now on.
@@ -855,11 +884,11 @@ impl Core {
             }
             SettingsSet::METHOD => {
                 let p: SettingSet = decode::<SettingsSet>(params)?;
-                self.set_setting(p.path, p.value, p.session_id).await
+                self.change_settings(vec![(p.path, p.value)], p.session_id).await
             }
             SettingsReset::METHOD => {
                 let p: SettingPath = decode::<SettingsReset>(params)?;
-                self.set_setting(p.path, Value::Null, None).await
+                self.change_settings(vec![(p.path, Value::Null)], None).await
             }
             SecretsSet::METHOD => {
                 let p: SecretSet = decode::<SecretsSet>(params)?;
@@ -980,6 +1009,7 @@ impl Core {
                 let pin = session.and_then(|s| s.lock().unwrap().model.clone());
                 Ok(serde_json::to_value(self.inner.runtime().model_list(pin)).unwrap_or_default())
             }
+            ModelUse::METHOD => self.use_model(decode::<ModelUse>(params)?).await,
             ModelComplete::METHOD => {
                 dispatch::<ModelComplete, _>(params, |p| self.model_complete(p))
             }
