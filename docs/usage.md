@@ -33,6 +33,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `f1` | open the searchable help popup: Commands, Keys and Docs |
 | `down` / `ctrl+b` | the tray below the prompt: queued messages, sub-agents and shell jobs. `down` on an empty prompt moves into it (the Queue page first when anything is queued; `up` from its top row leaves), `tab` switches pages, `enter` opens one (a sub-agent's session in the chat, a shell job as a terminal in the tray), `c` cancels, `esc` goes back; a click does the same. On the Queue page `enter` edits a message, `s` switches it between steer and next (when no turn runs: sends it now), `shift+up`/`shift+down` move it, `d` drops it and `r` resumes a paused queue. `ctrl+b` folds the tray to one line. In a sub-agent's session, `‹ main` in the tray or `esc` on an empty prompt goes back |
 | `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
+| `alt+m` | switch the session to its provider's next model (the list `/model` keeps) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
 | `ctrl+]` / `ctrl+5` | **term plugin:** open or focus a terminal panel (Unix); in the terminal, return to the prompt |
@@ -88,7 +89,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/paste` | paste a screenshot or text from the local clipboard |
 | `/attach PATH` | attach a PNG, JPEG or WebP file |
 | `/detach [N|all]` | remove an attachment (default: the last one) |
-| `/model [name]` | show or change the on-screen session's model for its selected provider |
+| `/model [name]` | alone, a picker of every provider's models (type a name that is not there to add it); with a name, switch the on-screen session to that model of its provider and add it to the provider's list (`providers.<name>.models`); `/model rm NAME` takes one off |
 | `/provider` | open the Providers page in `/config` |
 | `/tui`, `/tui use NAME`, `/tui create NAME [bare]`, `/tui delete NAME` | choose the built-in standard or bare library (read-only) or one of yours; create one that starts from standard (or bare) and holds only your changes, or move an inactive one aside |
 | `/new`, `/clear` | start a new session |

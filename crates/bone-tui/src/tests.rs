@@ -6081,3 +6081,44 @@ async fn reconnect_dropping_future_during_backoff_cancels_future_accepts() {
         "cancelled reconnect attempted another connection"
     );
 }
+
+/// `/model` is the runtime's Lua command: a picker of every provider's
+/// models, where a name that is not listed can be typed and added; alt+m
+/// goes round the chat's provider's models.
+#[tokio::test]
+async fn model_command_picks_and_adds_models() {
+    let mut h = Harness::new().await;
+    let last_set = |h: &Harness| {
+        h.requests("settings/set")
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    };
+    h.input("/model{enter}").await;
+    let screen = h.screen(100, 34);
+    for row in ["● qwen · q1", "  ds · d1", "  extra · e1", "Edit providers…"] {
+        assert!(screen.contains(row), "{row} in {screen}");
+    }
+    // The chat's provider comes first.
+    assert!(screen.find("qwen · q1") < screen.find("ds · d1"), "{screen}");
+    h.input("q9").await;
+    assert!(
+        h.screen(100, 34).contains("+ qwen · q9  (add)"),
+        "{}",
+        h.screen(100, 34)
+    );
+    h.input("{enter}").await;
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.qwen.model", "value": "q9" })
+    );
+    // Another provider's model: that provider is chosen.
+    h.input("/model{enter}").await;
+    h.input("d1").await;
+    h.input("{enter}").await;
+    assert_eq!(last_set(&h), json!({ "path": "provider", "value": "ds" }));
+    // With one model listed there is nothing to go round to.
+    let before = h.requests("settings/set").len();
+    h.input("{alt+m}").await;
+    assert_eq!(h.requests("settings/set").len(), before);
+}
