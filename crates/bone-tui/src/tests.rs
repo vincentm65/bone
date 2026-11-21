@@ -6082,26 +6082,21 @@ async fn reconnect_dropping_future_during_backoff_cancels_future_accepts() {
     );
 }
 
-/// `/model` is the runtime's Lua command: a picker of every provider's
-/// models, where a name that is not listed can be typed and added; alt+m
-/// goes round the chat's provider's models.
+/// `/model` is the runtime's Lua command: a picker of the chat's provider's
+/// models, where a name that is not listed can be typed and added, with the
+/// other providers' models under a heading of their own; alt+m goes round
+/// the chat's provider's models.
 #[tokio::test]
 async fn model_command_picks_and_adds_models() {
     let mut h = Harness::new().await;
     let last_use = |h: &Harness| h.requests("model/use").last().cloned().unwrap_or_default();
     h.input("/model{enter}").await;
     let screen = h.screen(100, 34);
-    for row in ["● qwen · q1", "  ds · d1", "  extra · e1", "Edit providers…"] {
-        assert!(screen.contains(row), "{row} in {screen}");
-    }
-    // The chat's provider comes first.
-    assert!(screen.find("qwen · q1") < screen.find("ds · d1"), "{screen}");
+    let at = |row: &str| screen.find(row).unwrap_or_else(|| panic!("{row} in {screen}"));
+    let rows = ["│ qwen", "● q1", "│ Other providers", "  ds · d1", "  extra · e1", "Edit providers…"];
+    assert!(rows.windows(2).all(|w| at(w[0]) < at(w[1])), "{screen}");
     h.input("q9").await;
-    assert!(
-        h.screen(100, 34).contains("+ qwen · q9  (add)"),
-        "{}",
-        h.screen(100, 34)
-    );
+    assert!(h.screen(100, 34).contains("+ add q9"), "{}", h.screen(100, 34));
     h.input("{enter}").await;
     assert_eq!(last_use(&h), json!({ "provider": "qwen", "model": "q9" }));
     // Another provider's model.

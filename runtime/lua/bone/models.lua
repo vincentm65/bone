@@ -77,8 +77,8 @@ function M.remove(model)
   end)
 end
 
---- The picker: every provider's models (the chat's first, its model
---- marked), and a row to add what is typed to the chat's provider.
+--- The picker: the chat's provider's models (the one in use marked), with
+--- a row to add what is typed; under them, the other providers' models.
 function M.pick()
   local here
   local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
@@ -87,10 +87,11 @@ function M.pick()
     loading = true,
     empty = "no model provider is configured",
     format = function(it) return it.text end,
+    section = function(it) return it.section end,
     create = function(query)
       query = trim(query)
       if here and query ~= "" and not index(here.models, query) then
-        return "+ " .. M.label(here.name, query) .. "  (add)"
+        return "+ add " .. query, here.name
       end
     end,
     on_create = function(query) M.use(here.name, trim(query)) end,
@@ -106,10 +107,12 @@ function M.pick()
     for _, p in ipairs(providers) do
       for _, m in ipairs(p.models) do
         local on = p.current and m == p.model
-        items[#items + 1] = { provider = p.name, model = m, current = on, text = (on and "● " or "  ") .. M.label(p.name, m) }
+        items[#items + 1] = { provider = p.name, model = m, current = on,
+          text = (on and "● " or "  ") .. (p.current and m or M.label(p.name, m)),
+          section = p.current and p.name or "Other providers" }
       end
     end
-    items[#items + 1] = { edit = true, text = "  Edit providers…" }
+    items[#items + 1] = { edit = true, text = "  Edit providers…", section = #providers > 1 and "Other providers" or nil }
     picker:set_items(items)
   end)
 end

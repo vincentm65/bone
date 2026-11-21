@@ -1172,9 +1172,11 @@ end
 ---   opts.prompt: text before the filter ("")
 ---   opts.format: function(item) -> string (default tostring)
 ---   opts.on_choice: function(item, index), with nil if cancelled
----   opts.create: function(query) -> label or nil: a last row that takes
----     what was typed (none while nothing is, or when it returns nil);
----     choosing it calls opts.on_create(query) instead of on_choice
+---   opts.section: function(item) -> name or nil: items in a run with the
+---     same name get it as a heading (keep each section's items together)
+---   opts.create: function(query) -> label, section: a row that takes what
+---     was typed (none while nothing is, or when it returns nil), last in
+---     its section; choosing it calls opts.on_create(query), not on_choice
 ---   opts.loading: show "loading…" until :set_items is called
 ---   opts.empty: what to show for an empty list
 ---   opts.footer: the hint line (false for none)
@@ -1194,12 +1196,17 @@ function bone.ui.select(items, opts)
     for i, it in ipairs(st.items) do
       local text = format(it)
       if q == "" or text:lower():find(q, 1, true) then
-        out[#out + 1] = { item = it, index = i, text = text }
+        out[#out + 1] = { item = it, index = i, text = text, section = opts.section and opts.section(it) }
       end
     end
-    local label = opts.create and st.query ~= "" and opts.create(st.query)
+    local label, section
+    if opts.create and st.query ~= "" then label, section = opts.create(st.query) end
     if label then
-      out[#out + 1] = { create = st.query, text = label }
+      local at = #out + 1
+      for i, m in ipairs(out) do
+        if section and m.section == section then at = i + 1 end
+      end
+      table.insert(out, at, { create = st.query, text = label, section = section })
     end
     return out
   end
@@ -1235,11 +1242,19 @@ function bone.ui.select(items, opts)
     elseif #list == 0 then
       body[#body + 1] = { { #st.items == 0 and (opts.empty or "nothing to pick") or "no matches", "Dim" } }
     end
-    local first = math.max(1, st.sel - rows + 1)
-    for i = first, math.min(#list, first + rows - 1) do
-      local t = bone.text.truncate(list[i].text, inner)
-      local hl = i == st.sel and "Selection" or "Normal"
-      body[#body + 1] = { { t .. string.rep(" ", inner - bone.text.width(t)), hl } }
+    -- The rows: each match, and a heading where its section starts.
+    local lines, at = {}, 1
+    for i, m in ipairs(list) do
+      if m.section and m.section ~= (list[i - 1] or {}).section then
+        lines[#lines + 1] = { m.section, "Dim" }
+      end
+      lines[#lines + 1] = { m.text, i == st.sel and "Selection" or "Normal" }
+      if i == st.sel then at = #lines end
+    end
+    local first = math.max(1, at - rows + 1)
+    for i = first, math.min(#lines, first + rows - 1) do
+      local t = bone.text.truncate(lines[i][1], inner)
+      body[#body + 1] = { { t .. string.rep(" ", inner - bone.text.width(t)), lines[i][2] } }
     end
     while #body < h - 2 - (footer and 1 or 0) do
       body[#body + 1] = {}
