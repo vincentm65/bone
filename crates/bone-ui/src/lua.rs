@@ -1939,15 +1939,12 @@ fn cmd<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue>
     ret(lua, ())
 }
 
-/// Run a command line (with or without the leading `/`): `/model`, or a
-/// command Lua defined, with its arguments parsed by its spec.
+/// Run a command line (with or without the leading `/`): a command Lua
+/// defined, with its arguments parsed by its spec.
 pub fn execute<H: Host>(h: &mut H, line: &str) {
     let line = line.trim().trim_start_matches('/');
     let (word, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let args = args.trim();
-    if word == "model" {
-        return model_command(h, args);
-    }
     let Some((name, cmd)) = h
         .user_commands()
         .iter()
@@ -1982,45 +1979,6 @@ pub fn execute<H: Host>(h: &mut H, line: &str) {
         }
         Ok(Value::Table(t))
     });
-}
-
-/// `/model`: show the current provider's model, or set it.
-fn model_command<H: Host>(h: &mut H, args: &str) {
-    use bone_proto::methods::{MaybeSession, ModelList, SettingSet, SettingsSet};
-    let c = h.chat_store();
-    let session_id = c.chats[c.current].session_id().map(str::to_owned);
-    let args = args.to_owned();
-    request_typed::<H, ModelList>(
-        h,
-        MaybeSession {
-            session_id: session_id.clone(),
-        },
-        move |h, r| {
-            let models = match r {
-                Ok(models) => models,
-                Err(e) => return h.error(format!("cannot list models: {e}")),
-            };
-            let Some(current) = models.into_iter().find(|model| model.current) else {
-                return h.error("no model provider is configured".into());
-            };
-            if args.is_empty() {
-                return h.info(format!("{} ({})", current.model, current.name));
-            }
-            let model = args.clone();
-            request_typed::<H, SettingsSet>(
-                h,
-                SettingSet {
-                    path: format!("providers.{}.model", current.name),
-                    value: serde_json::Value::String(args),
-                    session_id,
-                },
-                move |h, r| match r {
-                    Ok(_) => h.info(format!("model: {} ({})", model, current.name)),
-                    Err(e) => h.error(format!("cannot set model: {e}")),
-                },
-            );
-        },
-    );
 }
 
 /// `bone.ui.geometry()`: the leaves drawn last frame (empty ones left out)
