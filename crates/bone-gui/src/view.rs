@@ -142,6 +142,13 @@ impl Gui {
         }
     }
 
+    /// `bone.o.zoom`: how many of the window's pixels each of the view's
+    /// is (1: the system's scale alone), 0.5 to 3.
+    pub(crate) fn zoom(&self) -> f32 {
+        let z = self.number_option("zoom", 1.0);
+        if z.is_finite() { z.clamp(0.5, 3.0) } else { 1.0 }
+    }
+
     /// `bone.o.font_size`: the monospace font's size.
     pub(crate) fn mono_size(&self) -> f32 {
         self.number_option("font_size", 14.0).clamp(6.0, 72.0)

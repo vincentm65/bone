@@ -20,7 +20,7 @@ local SEGMENTS = 5
 -- The options in groups, each under its name; one in none of them (a
 -- plugin's) is under the last.
 local GROUPS = {
-  { "Appearance", "font", "font_sans", "font_sans_bold", "font_sans_italic", "font_size", "opacity", "titlebar",
+  { "Appearance", "zoom", "font", "font_sans", "font_sans_bold", "font_sans_italic", "font_size", "opacity", "titlebar",
     "widget_radius", "window_radius" },
   { "Chat", "show_reasoning", "tool_detail", "tool_preview_lines", "diff_preview_lines", "fold_turns" },
   { "Input", "prompt_max_height", "queue_mode", "scroll_line", "wheel_speed", "mouse", "timeoutlen" },
