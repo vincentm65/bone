@@ -104,9 +104,9 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         "queue/add" => json!({ "id": 1 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "model/list" => json!([
-            { "name": "ds", "model": "d1", "current": false },
-            { "name": "qwen", "model": "q1", "current": true, "base_url": "http://localhost:8081/v1" },
-            { "name": "extra", "model": "e1", "current": false, "base_url": "http://e/v1", "added": true },
+            { "name": "ds", "model": "d1", "models": ["d1"], "current": false },
+            { "name": "qwen", "model": "q1", "models": ["q1"], "current": true, "base_url": "http://localhost:8081/v1" },
+            { "name": "extra", "model": "e1", "models": ["e1"], "current": false, "base_url": "http://e/v1", "added": true },
         ]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
@@ -6088,12 +6088,7 @@ async fn reconnect_dropping_future_during_backoff_cancels_future_accepts() {
 #[tokio::test]
 async fn model_command_picks_and_adds_models() {
     let mut h = Harness::new().await;
-    let last_set = |h: &Harness| {
-        h.requests("settings/set")
-            .last()
-            .cloned()
-            .unwrap_or_default()
-    };
+    let last_use = |h: &Harness| h.requests("model/use").last().cloned().unwrap_or_default();
     h.input("/model{enter}").await;
     let screen = h.screen(100, 34);
     for row in ["● qwen · q1", "  ds · d1", "  extra · e1", "Edit providers…"] {
@@ -6108,17 +6103,17 @@ async fn model_command_picks_and_adds_models() {
         h.screen(100, 34)
     );
     h.input("{enter}").await;
-    assert_eq!(
-        last_set(&h),
-        json!({ "path": "providers.qwen.model", "value": "q9" })
-    );
-    // Another provider's model: that provider is chosen.
+    assert_eq!(last_use(&h), json!({ "provider": "qwen", "model": "q9" }));
+    // Another provider's model.
     h.input("/model{enter}").await;
     h.input("d1").await;
     h.input("{enter}").await;
-    assert_eq!(last_set(&h), json!({ "path": "provider", "value": "ds" }));
+    assert_eq!(last_use(&h), json!({ "provider": "ds", "model": "d1" }));
+    // /model NAME: the chat's provider (the core knows which).
+    h.input("/model q7{enter}").await;
+    assert_eq!(last_use(&h), json!({ "model": "q7" }));
     // With one model listed there is nothing to go round to.
-    let before = h.requests("settings/set").len();
+    let before = h.requests("model/use").len();
     h.input("{alt+m}").await;
-    assert_eq!(h.requests("settings/set").len(), before);
+    assert_eq!(h.requests("model/use").len(), before);
 }
