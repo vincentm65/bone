@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use bone_proto::methods::ModelInfo;
 use bone_proto::methods::{
-    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionUpdated, SessionUpdatedParams,
-    TurnFinished,
+    AskRequested, AskResolved, PluginInfo, QueueChanged, ReloadResult, SessionUpdated,
+    SessionUpdatedParams, TurnFinished,
 };
 use bone_proto::types::{ChatMessage, SessionOwner};
 use serde_json::{Value as Json, json};
@@ -510,6 +510,44 @@ impl Host {
             }),
         );
         Ok(json!({ "stream": id }))
+    }
+
+    /// `{ queue_wait = { id, ms } }` from core Lua (`bone.queue.wait`): done
+    /// when session `id`'s queue changes or `ms` pass. Called as the Lua
+    /// yields, so it listens from then: a message queued before the wait
+    /// first runs still counts. `None` for other waits.
+    pub(crate) fn queue_wait(
+        &self,
+        spec: &Json,
+    ) -> Option<impl std::future::Future<Output = Result<Json, String>> + Send + 'static> {
+        let wait = spec.get("queue_wait")?;
+        let id = wait["id"].as_str().map(str::to_owned);
+        let ms = wait["ms"].as_u64().unwrap_or(0);
+        let events = self.inner().map(|inner| inner.events.subscribe());
+        Some(async move {
+            let id = id.ok_or_else(|| "bone.queue.wait needs a session id".to_string())?;
+            let mut events = events?;
+            let changed = async {
+                loop {
+                    match events.recv().await {
+                        Ok(ev)
+                            if ev.method == <QueueChanged as bone_proto::Notification>::METHOD
+                                && ev.params["session_id"] == id.as_str() =>
+                        {
+                            return;
+                        }
+                        Ok(_) => {}
+                        // A missed event may have been the change.
+                        Err(broadcast::error::RecvError::Lagged(_)) => return,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            std::future::pending::<()>().await
+                        }
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_millis(ms), changed).await;
+            Ok(json!(true))
+        })
     }
 
     /// `{ session_run = { id, text } }` from core Lua: start a turn on an
