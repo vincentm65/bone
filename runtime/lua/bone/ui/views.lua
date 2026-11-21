@@ -1012,11 +1012,12 @@ local function summary_view(item, ctx)
   else
     spans[1] = { shown, "ToolArgs" }
   end
-  -- Failures close the line, in the error color.
+  -- Failures close the line, in the error color. The comma stays with
+  -- the summary, the same way the desktop line draws it.
   local last = spans[#spans]
-  local before, failed = last[1]:match("^(.-)(, %d+ failed)$")
+  local before, failed = last[1]:match("^(.-), (%d+ failed)$")
   if failed and last[2] == "ToolArgs" then
-    last[1] = before
+    last[1] = before .. ", "
     spans[#spans + 1] = { failed, "ToolError" }
   end
   append(out, wrap(spans, ctx.width, {

@@ -109,9 +109,9 @@ function M.node()
       { text = glyph[1], hl = glyph[2], size = style.size.caption },
     }, function() ui.sel = i; open(r) end, "option", false))
     if r.name then line[#line + 1] = { text = r.name, hl = live and "Accent" or "Dim", size = style.size.caption } end
-    line[#line + 1] = { text = r.title or "", hl = live and "Normal" or "Dim", size = style.size.caption, wrap = false, shrink = 1, max_width = "45%", overflow = "hidden" }
+    line[#line + 1] = { text = r.title or "", hl = live and "Normal" or "Dim", size = style.size.caption, wrap = false, text_overflow = "ellipsis", shrink = 1, max_width = "45%", overflow = "hidden" }
     if r.detail and r.detail ~= "" then
-      line[#line + 1] = { text = r.detail, hl = "Dim", size = style.size.small, wrap = false, shrink = 1, overflow = "hidden" }
+      line[#line + 1] = { text = r.detail, hl = "Dim", size = style.size.small, wrap = false, text_overflow = "ellipsis", shrink = 1, overflow = "hidden" }
     end
     line[#line + 1] = { grow = 1 }
     line[#line + 1] = { text = time, hl = "Dim", size = style.size.small }
