@@ -33,6 +33,9 @@ function M.select(page)
     end
     local selected
     for i, m in ipairs(list) do
+      if m.section and m.section ~= (list[i - 1] or {}).section then
+        items[#items + 1] = widgets.heading(m.section)
+      end
       items[#items + 1] = entry(i == st.sel, { { text = m.text, hl = "Normal", bold = i == st.sel, size = style.size.body } },
         function() page.finish(m) end)
       if i == st.sel then selected = #items end
