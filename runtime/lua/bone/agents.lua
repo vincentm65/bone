@@ -18,7 +18,9 @@ function M.add(info)
     key = "agent:" .. info.session_id,
     id = info.session_id,
     name = o.name or "agent",
-    title = info.title or "sub-agent",
+    -- A sub-agent's title is its whole task, often many lines; every view
+    -- draws it as one line.
+    title = (info.title or "sub-agent"):gsub("%s+", " "):match("^ ?(.-) ?$"),
     parent = o.session_id,
     cwd = info.cwd,
     tokens = 0,
