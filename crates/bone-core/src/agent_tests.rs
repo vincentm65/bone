@@ -2041,7 +2041,9 @@ async fn provider_limits_override_the_global_limit_at_both_checks() {
         ).await;
         h.start("q1").await;
         if keep == 0 {
-            // Nothing to summarize before the first call; compact after its reply.
+            // Over the 1-token limit before the first call: the request is
+            // summarized (a1). Still over it after, so the reply (SUM) is
+            // not summarized again: compacting cannot get under this limit.
             assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
             h.until::<TurnFinished>().await;
         } else {
@@ -2104,6 +2106,46 @@ async fn tool_definitions_do_not_inflate_the_estimate() {
     h.start(&"q".repeat(2000)).await;
     h.until::<TurnFinished>().await;
     assert_eq!(h.last_seen().len(), 3, "compacted: {:?}", h.last_seen());
+}
+
+#[tokio::test]
+async fn a_long_tool_loop_compacts_again_without_a_new_user_message() {
+    // keep = 0 summarizes everything, so a turn whose tool loop outgrows
+    // the limit again after one compaction is compacted again. It used to
+    // wait for a user message after the summary, and a long run of tool
+    // calls (screenshots, say) went on past the limit until the server
+    // refused it.
+    let mut h = Harness::with_lua(
+        r#"bone.config.compact = { keep = 0, limit = 20000 }
+        bone.tool.register { name = "look", run = function() return string.rep("x", 100000) end }"#,
+        vec![
+            calls(&[("c1", "look", json!({}))]),
+            text("S1"),
+            calls(&[("c2", "look", json!({}))]),
+            text("S2"),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("q1").await;
+    for _ in 0..2 {
+        assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+    }
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    assert!(h.provider.steps.lock().unwrap().is_empty());
+    // The last call got the second summary in place of the whole tool loop.
+    let seen = h.last_seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    let ChatMessage::User { content, .. } = &seen[0] else {
+        panic!("not a summary: {seen:?}");
+    };
+    assert!(
+        content.starts_with("Summary of the earlier conversation:\n\nS2"),
+        "{content}"
+    );
 }
 
 // ---- parallel tool calls and output limits --------------------------------------

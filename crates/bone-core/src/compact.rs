@@ -392,7 +392,8 @@ pub(crate) fn tokens(s: &Session, messages: &[ChatMessage]) -> u64 {
 
 /// What one compaction would summarize: the earlier summary (if any) and
 /// the messages after it, up to `cut`, the start of the last `keep` user
-/// turns (so no tool call is separated from its result).
+/// turns (so no tool call is separated from its result), or with `keep`
+/// 0 everything, the tool loop of a running turn included.
 struct Plan {
     cut: usize,
     input: Vec<ChatMessage>,
@@ -402,16 +403,22 @@ struct Plan {
 
 fn plan(s: &Session, keep: usize) -> Option<Plan> {
     let from = s.summary.as_ref().map_or(0, |sum| sum.through);
-    let users: Vec<usize> = (from..s.messages.len())
-        .filter(|&i| matches!(s.messages[i], ChatMessage::User { .. }))
-        .collect();
-    if users.len() <= keep {
+    let cut = if keep == 0 {
+        // Not "a user message since the summary": a long tool loop
+        // compacted once could then never be compacted again in that turn.
+        s.messages.len()
+    } else {
+        let users: Vec<usize> = (from..s.messages.len())
+            .filter(|&i| matches!(s.messages[i], ChatMessage::User { .. }))
+            .collect();
+        if users.len() <= keep {
+            return None;
+        }
+        users[users.len() - keep]
+    };
+    if cut <= from {
         return None;
     }
-    let cut = match keep {
-        0 => s.messages.len(),
-        k => users[users.len() - k],
-    };
     let mut input: Vec<ChatMessage> = s
         .summary
         .iter()
