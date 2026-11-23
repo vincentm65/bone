@@ -108,7 +108,7 @@ local function compute(fresh)
       -- A chat with no title has no message in it: nothing to go back to.
       -- It stays listed while on screen, pinned, running or searched for.
       local empty = not s.title and st.query == "" and s.session_id ~= current
-        and not chats.pinned[s.session_id] and not chats.live[s.session_id]
+        and not chats.pinned[s.session_id] and not chats.busy(s.session_id)
       return not empty and (not st.project or s.cwd == st.project)
     end)
     if #list == 0 then

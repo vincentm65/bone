@@ -192,9 +192,19 @@ end
 function M.section(id, at)
   if M.pinned[id] then return 1 end
   if M.waiting(id) then return 2 end
-  if M.live[id] then return 3 end
+  if M.busy(id) then return 3 end
   if not M.archived[id] and at >= os.time() - M.recent_window() then return 2 end
   return 4
+end
+
+--- Whether chat `id` is still working: its own turn runs, or one of its
+--- sub-agents' does (a turn that ended to wait for background agents).
+function M.busy(id)
+  if M.live[id] then return true end
+  for _, a in ipairs(agents.list()) do
+    if M.live[a.id] and a.id ~= id and agents.top(a.id) == id then return true end
+  end
+  return false
 end
 
 --- Sessions with a turn running that this frontend already knows of;
@@ -253,7 +263,7 @@ function M.grouped(all, query, stats)
       local g = M.section(sid, at)
       groups[sid], activities[sid] = g, at
       sizes[g] = sizes[g] + 1
-      running = running or M.live[sid]
+      running = running or M.busy(sid)
       items[#items + 1] = s
     end
   end
@@ -372,7 +382,7 @@ end
 function M.state(id)
   if not id then return nil end
   if M.waiting(id) then return "waiting" end
-  if M.live[id] then return "running" end
+  if M.busy(id) then return "running" end
   if id ~= on_screen() then
     if M.failed[id] then return "failed" end
     if M.unread[id] then return "unread" end
@@ -442,7 +452,7 @@ function M.elsewhere()
     end
   end
   for id in pairs(M.unread) do
-    if id ~= current and not seen[id] and not M.live[id] then out.unread = out.unread + 1 end
+    if id ~= current and not seen[id] and not M.busy(id) then out.unread = out.unread + 1 end
   end
   return out
 end
@@ -502,7 +512,15 @@ local function turn_changed(ev, running)
   if not id then return end
   M.versions[id] = (M.versions[id] or 0) + 1
   M.live[id], M.touched[id] = running, os.time()
-  M.started[id] = running and os.time() or nil
+  -- A chat waiting on its sub-agents keeps its clock through the wait
+  -- and the turn that picks their answers up.
+  local top = agents.top(id)
+  if running then
+    M.started[id] = (top == id and M.started[id]) or os.time()
+  elseif not M.busy(id) then
+    M.started[id] = nil
+  end
+  if top ~= id and not running and not M.busy(top) then M.started[top] = nil end
   if running then M.failed[id] = nil end
   -- A turn that ends in a chat you are not looking at is new to you (an
   -- agent's ends in its own chat, which you did not start), and says so
