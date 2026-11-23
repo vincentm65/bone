@@ -237,6 +237,15 @@ impl Turn<'_> {
         self.compact(reason, prefix).await
     }
 
+    /// Whether the session's context (after `system`, when given) is
+    /// estimated over `limit` tokens.
+    fn over_limit(&self, system: Option<&ChatMessage>, limit: u64) -> bool {
+        let s = self.session.lock().unwrap();
+        let mut all: Vec<ChatMessage> = system.into_iter().cloned().collect();
+        all.extend(s.context());
+        crate::compact::tokens(&s, &all) > limit
+    }
+
     /// The messages and tools of a model call after the `context` and
     /// `request` hooks, and the provider or model a request hook asked for.
     async fn request(&self, mut messages: Vec<ChatMessage>) -> Result<Request, Stop> {
@@ -382,6 +391,10 @@ impl Turn<'_> {
         }
         // Compacting after a context overflow, once per model call.
         let mut overflowed = false;
+        // The limit compacted and the context is still over it (the system
+        // prompt and tools alone fill it, say): compacting again cannot
+        // help, and with `keep` 0 it would summarize before every call.
+        let mut futile = false;
         // An empty reply is asked for again once (see below).
         let mut retried_empty = false;
         'call: loop {
@@ -416,8 +429,9 @@ impl Turn<'_> {
                         && crate::compact::can_compact(&s, compact.keep);
                     (over, all)
                 };
-                if over {
-                    self.compact_in_place(&system, "limit").await?;
+                if over && !futile {
+                    futile = self.compact_in_place(&system, "limit").await?
+                        && self.over_limit(Some(&system), limit);
                 } else {
                     checked = Some(all);
                 }
@@ -641,11 +655,9 @@ impl Turn<'_> {
             if calls.is_empty() {
                 let compact = self.compact_config();
                 if let Some(limit) = compact.limit {
-                    let can = {
+                    let can = !futile && self.over_limit(None, limit) && {
                         let s = self.session.lock().unwrap();
-                        let context = s.context();
-                        crate::compact::tokens(&s, &context) > limit
-                            && crate::compact::can_compact(&s, compact.keep)
+                        crate::compact::can_compact(&s, compact.keep)
                     };
                     if can {
                         self.compact_in_place(&system, "limit").await?;
