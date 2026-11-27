@@ -469,36 +469,21 @@ impl App {
         self.dirty = true;
     }
 
-    /// A fresh session (created on the first message).
-    pub fn new_session(&mut self) {
-        let c = &mut self.chats[self.current];
-        if c.session.is_none() && c.entries.is_empty() && !c.starting {
-            // A new incognito chat becomes a plain one.
-            if c.incognito {
-                c.incognito = false;
-                self.dirty = true;
-            }
-            return;
-        }
-        self.chats.push(ChatBuffer::new(None));
-        self.show_chat(self.chats.len() - 1);
-    }
-
-    /// A fresh incognito chat: its session is kept in memory only. On a
-    /// chat not started yet, switches it between incognito and not.
-    pub fn new_incognito(&mut self) {
+    /// A fresh session (created on the first message), `incognito` (kept in
+    /// memory only) or not: the chat on screen if it has not started yet.
+    pub fn new_session(&mut self, incognito: bool) {
         let c = &mut self.chats[self.current];
         if c.session.is_none() && c.entries.is_empty() && !c.starting && c.loading.is_none() {
-            c.incognito = !c.incognito;
+            c.incognito = incognito;
+            self.dirty = true;
         } else {
-            self.chats.push(ChatBuffer::new_incognito());
+            self.chats.push(ChatBuffer::new(None));
+            self.chats.last_mut().unwrap().incognito = incognito;
             self.show_chat(self.chats.len() - 1);
         }
-        match self.chats[self.current].incognito {
-            true => self.info("incognito: this chat is not saved anywhere"),
-            false => self.info("incognito off: this chat will be saved"),
+        if incognito {
+            self.info("incognito: this chat is not saved anywhere");
         }
-        self.dirty = true;
     }
 
     pub fn prompt_text(&self) -> String {
@@ -886,8 +871,8 @@ impl App {
                     self.prompt.delete();
                 }
             }
-            NewSession => self.new_session(),
-            NewIncognito => self.new_incognito(),
+            NewSession => self.new_session(false),
+            NewIncognito => self.new_session(true),
             Sessions => self.open_picker(),
             FocusNext => input::cycle_focus(self, true),
             FocusPrev => input::cycle_focus(self, false),

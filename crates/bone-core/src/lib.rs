@@ -1158,13 +1158,11 @@ impl Core {
             .ok_or_else(|| {
                 RpcError::invalid_params(format!("not a directory: {}", cwd.display()))
             })?;
-        let cwd = cwd.to_string_lossy().into_owned();
-        let sessions = &self.inner.sessions;
-        let session = match params.incognito {
-            true => sessions.create_incognito(cwd),
-            false => sessions.create(cwd),
-        }
-        .map_err(session_error)?;
+        let session = self
+            .inner
+            .sessions
+            .create_with(cwd.to_string_lossy().into(), None, &[], None, None, params.incognito)
+            .map_err(session_error)?;
         let info = session.lock().unwrap().info.clone();
         self.inner.created_session(&info);
         Ok(info)

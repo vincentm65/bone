@@ -236,22 +236,11 @@ impl Session {
             self.replays_reasoning = replays_reasoning;
         }
     }
-    /// Append `record` to the session's file (nothing for an incognito one).
-    fn write(&mut self, record: Record) -> std::io::Result<()> {
-        match &mut self.file {
-            Some(file) => write_record(file, record),
-            None => Ok(()),
-        }
+    /// Append `record` to the session's file; an incognito one has none.
+    fn write(&mut self, record: Record, timing: Option<ToolTiming>) -> std::io::Result<()> {
+        (self.file.as_mut()).map_or(Ok(()), |f| write_line(f, record, timing))
     }
 
-    fn write_timed(&mut self, record: Record, timing: ToolTiming) -> std::io::Result<()> {
-        match &mut self.file {
-            Some(file) => write_line(file, record, Some(timing)),
-            None => Ok(()),
-        }
-    }
-
-    /// Flush the file to disk (nothing for an incognito session).
     fn sync(&self) -> std::io::Result<()> {
         self.file.as_ref().map_or(Ok(()), File::sync_data)
     }
@@ -262,7 +251,7 @@ impl Session {
         if self.info.title.is_none() {
             self.info.title = title_of(&msg);
         }
-        let written = self.write(Record::Message(msg.clone()));
+        let written = self.write(Record::Message(msg.clone()), None);
         self.messages.push(msg);
         self.reindex();
         written
@@ -273,7 +262,7 @@ impl Session {
         if let ChatMessage::Tool { call_id, .. } = &msg {
             self.tool_times.insert(call_id.clone(), timing);
         }
-        let written = self.write_timed(Record::Message(msg.clone()), timing);
+        let written = self.write(Record::Message(msg.clone()), Some(timing));
         self.messages.push(msg);
         self.reindex();
         written
@@ -290,14 +279,14 @@ impl Session {
             timing,
         };
         self.turn_ends.push(end.clone());
-        let written = self.write(Record::Turn(end));
+        let written = self.write(Record::Turn(end), None);
         self.reindex();
         written
     }
 
     /// Keep what a model call used (in the file, not the transcript).
     pub fn usage(&mut self, usage: UsageRecord) -> std::io::Result<()> {
-        let written = self.write(Record::Usage(usage));
+        let written = self.write(Record::Usage(usage), None);
         self.reindex();
         written
     }
@@ -305,7 +294,7 @@ impl Session {
     /// Lock the session to `model` (kept in the file).
     pub fn pin(&mut self, model: Pin) -> std::io::Result<()> {
         self.model = Some(model.clone());
-        self.write(Record::Model(model))
+        self.write(Record::Model(model), None)
     }
 
     /// Change its title, pinned or archived (`None` keeps one): a record for
@@ -323,7 +312,7 @@ impl Session {
         records.extend((pinned.filter(|&p| p != self.info.pinned)).map(Record::Pinned));
         records.extend((archived.filter(|&a| a != self.info.archived)).map(Record::Archived));
         for r in &records {
-            self.write(r.clone())?;
+            self.write(r.clone(), None)?;
             apply(&mut self.info, r);
         }
         let changed = !records.is_empty();
@@ -336,7 +325,7 @@ impl Session {
     /// Move to `cwd` (nothing moves if the file write fails): tools run there
     /// from the next turn on.
     pub fn cd(&mut self, cwd: String) -> std::io::Result<()> {
-        self.write(Record::Cwd(cwd.clone()))?;
+        self.write(Record::Cwd(cwd.clone()), None)?;
         self.sync()?;
         moved(
             &mut self.moves,
@@ -422,7 +411,7 @@ impl Session {
         // Everything after the checkpoint builds on it: make sure it is on
         // disk, not only in the page cache, before going on.
         let written = self
-            .write(Record::Compact(messages.clone()))
+            .write(Record::Compact(messages.clone()), None)
             .and_then(|()| self.sync());
         let kept = same_start(&self.messages, &messages);
         self.turn_ends.retain(|t| t.messages <= kept);
@@ -439,7 +428,7 @@ impl Session {
     /// transcript's older part.
     pub fn summarize(&mut self, summary: Option<Summary>) -> std::io::Result<()> {
         let written = self
-            .write(Record::Summary(summary.clone()))
+            .write(Record::Summary(summary.clone()), None)
             .and_then(|()| self.sync());
         self.summary = summary;
         written
@@ -543,12 +532,6 @@ impl SessionStore {
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
         self.create_with(cwd, None, &[], None, None, false)
-    }
-
-    /// A new session kept in memory only: no file, index entry or queue
-    /// file; gone when the core exits or it is deleted.
-    pub fn create_incognito(&self, cwd: String) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, &[], None, None, true)
     }
 
     /// A new session starting with messages, an optional summary and model.
@@ -1465,7 +1448,7 @@ mod tests {
         let store = SessionStore::new(dir.path());
         // An ordinary session, so the directory and index exist.
         store.create("/plain".into()).unwrap();
-        let s = store.create_incognito("/w".into()).unwrap();
+        let s = (store.create_with("/w".into(), None, &[], None, None, true)).unwrap();
         let id = s.lock().unwrap().info.session_id.clone();
         {
             let mut s = s.lock().unwrap();

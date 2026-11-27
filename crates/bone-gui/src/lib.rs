@@ -353,34 +353,19 @@ impl Gui {
     }
 
     /// A new, unsaved chat; the session is created by its first message.
-    pub fn new_chat(&mut self) {
-        let c = &mut self.chats[self.current];
-        if c.session.is_some() || !c.entries.is_empty() {
+    /// `incognito`: its session is kept in memory only.
+    pub fn new_chat(&mut self, incognito: bool) {
+        let c = &self.chats[self.current];
+        let mut buf = self.current;
+        if c.session.is_some() || !c.entries.is_empty() || c.loading.is_some() {
             self.chats.push(ChatBuffer::new(None));
-            self.show_chat(self.chats.len() - 1);
-        } else if c.incognito {
-            // A new incognito chat becomes a plain one.
-            c.incognito = false;
-            self.show_chat(self.current);
+            buf = self.chats.len() - 1;
         }
-    }
-
-    /// A new incognito chat: its session is kept in memory only. On a chat
-    /// not started yet, switches it between incognito and not.
-    pub fn new_incognito_chat(&mut self) {
-        let c = &mut self.chats[self.current];
-        if c.session.is_none() && c.entries.is_empty() && !c.starting && c.loading.is_none() {
-            c.incognito = !c.incognito;
-            self.show_chat(self.current);
-        } else {
-            self.chats.push(ChatBuffer::new_incognito());
-            self.show_chat(self.chats.len() - 1);
+        self.chats[buf].incognito = incognito;
+        self.show_chat(buf);
+        if incognito {
+            self.info("incognito: this chat is not saved anywhere".into());
         }
-        let msg = match self.chats[self.current].incognito {
-            true => "incognito: this chat is not saved anywhere",
-            false => "incognito off: this chat will be saved",
-        };
-        self.info(msg.into());
     }
 
     /// Load chat `buf` again: as much of it as it had.

@@ -397,9 +397,7 @@ local function render(ctx)
         else
           right = { { status.text, (STATUS[status.hl] or "SessionStatusTime") .. sel } }
         end
-        -- An incognito chat (kept in memory only) is marked.
-        local title = (s.incognito and "◐ " or "") .. (s.title or "[untitled]")
-        formatted = spread({ { title, hl } }, right, hl)
+        formatted = spread({ { s.title or "[untitled]", hl } }, right, hl)
       else
         local meta = state.stats[s.session_id]
         local totals = meta and (count(meta.tokens) .. " tokens · " .. count(meta.turns) .. " turns")

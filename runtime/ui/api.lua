@@ -505,11 +505,6 @@ bone.api = {
   session = function()
     return api("session")
   end,
-  --- Whether the chat on screen is incognito: kept in memory only, never
-  --- written to disk (its session is, or a new chat's will be).
-  incognito = function()
-    return api("incognito")
-  end,
   --- The directory new sessions start in: where bone was started, until
   --- cd() (or /cd) names another.
   cwd = function()

@@ -20,7 +20,12 @@ pub fn session_ctx<H: Host>(h: &mut H, buf: usize) -> Json {
         return Json::Null;
     };
     let Some(s) = &c.session else {
-        return json!({ "title": c.title(), "running": c.starting, "new": true });
+        return json!({
+            "title": c.title(),
+            "running": c.starting,
+            "new": true,
+            "incognito": c.incognito,
+        });
     };
     json!({
         "session_id": s.session_id,
@@ -28,6 +33,7 @@ pub fn session_ctx<H: Host>(h: &mut H, buf: usize) -> Json {
         "cwd": s.cwd,
         "running": c.turn.is_some() || c.starting,
         "elapsed": c.turn.map(|t| t.started.elapsed().as_secs()),
+        "incognito": s.incognito,
     })
 }
 

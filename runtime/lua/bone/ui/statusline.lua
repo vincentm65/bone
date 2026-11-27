@@ -70,7 +70,7 @@ function bone.ui.statusline(ctx)
   -- What is going on, and what waits for you: kept when room runs out.
   local keep = {}
   -- An incognito chat says so: nothing of it is saved.
-  if bone.api.incognito and bone.api.incognito() then
+  if s and s.incognito then
     keep[#keep + 1] = { "◐ incognito", on_line("StatusLineIncognito", "Special") }
   end
   if session_id and chats.waiting(session_id) then
