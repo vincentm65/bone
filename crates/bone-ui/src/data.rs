@@ -224,6 +224,7 @@ pub fn session<L>(chat: &ChatBuffer<L>, buf: Option<usize>, current: bool) -> Js
     };
     v["title"] = json!(chat.title());
     v["new"] = json!(chat.session.is_none() && chat.loading.is_none());
+    v["incognito"] = json!(chat.session.as_ref().map_or(chat.incognito, |s| s.incognito));
     v["loading"] = json!(chat.loading);
     v["chat"] = json!(buf);
     v["current"] = json!(current);
