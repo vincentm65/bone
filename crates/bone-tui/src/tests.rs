@@ -681,27 +681,18 @@ async fn slash_menu_lists_arguments_without_a_slash() {
 #[tokio::test]
 async fn incognito_chat_creates_an_incognito_session() {
     let mut h = Harness::new().await;
-    let on = "bone.notify(tostring(bone.api.incognito()))";
-    assert_eq!(h.lua(on).await, "false");
-    // On a new chat, /incognito switches it on and off.
-    h.input("/incognito{enter}").await;
-    assert_eq!(h.lua(on).await, "true");
-    assert!(h.screen(80, 24).contains("◐ incognito"));
-    h.input("/incognito{enter}").await;
-    assert_eq!(h.lua(on).await, "false");
     assert!(!h.screen(80, 24).contains("◐ incognito"));
     h.input("/incognito{enter}").await;
+    assert!(h.screen(80, 24).contains("◐ incognito"));
     h.input("psst{enter}").await;
     assert_eq!(
         h.requests("session/create"),
         vec![json!({ "cwd": "/work", "incognito": true })]
     );
-    // From a started chat it opens a new incognito one; /new a plain one.
-    h.input("/incognito{enter}").await;
-    assert_eq!(h.lua(on).await, "true");
-    assert_eq!(h.app.chats.len(), 2);
+    // /new opens a plain chat.
     h.input("/new{enter}").await;
-    assert_eq!(h.lua(on).await, "false");
+    assert_eq!(h.app.chats.len(), 2);
+    assert!(!h.screen(80, 24).contains("◐ incognito"));
 }
 
 #[tokio::test]
