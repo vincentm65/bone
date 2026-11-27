@@ -20,6 +20,10 @@ cmd("new", function()
   bone.action("new_session")
 end, { desc = "start a new session", aliases = { "clear" } })
 
+cmd("incognito", function()
+  bone.action("new_incognito")
+end, { desc = "a new chat that is never saved (on a new chat: switch it on or off)" })
+
 cmd("archive", function()
   require("bone.ui.sessions").archive_current()
   bone.action("new_session")

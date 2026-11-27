@@ -841,9 +841,15 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
     let model: Option<Pin> =
         serde_json::from_value(model).map_err(|e| format!("bad model: {e}"))?;
     let model = model.or_else(|| owned(owner.as_ref()?).ok()?.lock().unwrap().model.clone());
+    // What an incognito session starts (a subagent) is incognito too.
+    let incognito = spec["incognito"].as_bool().unwrap_or(false)
+        || owner
+            .as_ref()
+            .and_then(|o| owned(o).ok())
+            .is_some_and(|s| s.lock().unwrap().info.incognito);
     let session = inner
         .sessions
-        .create_with(cwd, owner, &messages, summary, model)
+        .create_with(cwd, owner, &messages, summary, model, incognito)
         .map_err(|e| e.to_string())?;
     let mut info = session.lock().unwrap().info.clone();
     if let Some(title) = spec["title"]
@@ -1107,6 +1113,7 @@ mod tests {
                 std::slice::from_ref(&original),
                 None,
                 None,
+                false,
             )
             .unwrap();
         let id = source.lock().unwrap().info.session_id.clone();

@@ -129,6 +129,9 @@ pub struct RenderKey {
 pub struct ChatBuffer<L> {
     /// `None` until the first message creates the session.
     pub session: Option<SessionInfo>,
+    /// A new chat whose session, once its first message creates it, is to
+    /// be incognito (see [`ChatBuffer::incognito`]).
+    pub incognito: bool,
     pub entries: Vec<Entry>,
     pub turn: Option<RunningTurn>,
     /// A prompt was sent and the turn has not started yet.
@@ -209,6 +212,7 @@ impl<L> Default for ChatBuffer<L> {
     fn default() -> Self {
         ChatBuffer {
             session: None,
+            incognito: false,
             entries: Vec::new(),
             turn: None,
             starting: false,
@@ -246,8 +250,25 @@ impl<L> ChatBuffer<L> {
         self.session.as_ref().map(|s| s.session_id.as_str())
     }
 
+    /// A new chat that will be incognito.
+    pub fn new_incognito() -> Self {
+        ChatBuffer {
+            incognito: true,
+            ..Default::default()
+        }
+    }
+
+    /// Whether the chat is kept off disk: its session is incognito, or it
+    /// will be once created.
+    pub fn incognito(&self) -> bool {
+        self.session
+            .as_ref()
+            .map_or(self.incognito, |s| s.incognito)
+    }
+
     pub fn title(&self) -> String {
         match &self.session {
+            None if self.incognito => "[incognito]".into(),
             None => "[new session]".into(),
             Some(s) => s.title.clone().unwrap_or_else(|| "[untitled]".into()),
         }

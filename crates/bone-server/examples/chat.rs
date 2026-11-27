@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .request::<SessionCreate>(SessionCreateParams {
             // A socket server's own cwd is not ours.
             cwd: Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+            ..Default::default()
         })
         .await?;
     eprintln!("session {} in {}", session.session_id, session.cwd);

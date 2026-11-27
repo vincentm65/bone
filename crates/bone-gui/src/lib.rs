@@ -354,11 +354,33 @@ impl Gui {
 
     /// A new, unsaved chat; the session is created by its first message.
     pub fn new_chat(&mut self) {
-        let c = &self.chats[self.current];
+        let c = &mut self.chats[self.current];
         if c.session.is_some() || !c.entries.is_empty() {
             self.chats.push(ChatBuffer::new(None));
             self.show_chat(self.chats.len() - 1);
+        } else if c.incognito {
+            // A new incognito chat becomes a plain one.
+            c.incognito = false;
+            self.show_chat(self.current);
         }
+    }
+
+    /// A new incognito chat: its session is kept in memory only. On a chat
+    /// not started yet, switches it between incognito and not.
+    pub fn new_incognito_chat(&mut self) {
+        let c = &mut self.chats[self.current];
+        if c.session.is_none() && c.entries.is_empty() && !c.starting && c.loading.is_none() {
+            c.incognito = !c.incognito;
+            self.show_chat(self.current);
+        } else {
+            self.chats.push(ChatBuffer::new_incognito());
+            self.show_chat(self.chats.len() - 1);
+        }
+        let msg = match self.chats[self.current].incognito {
+            true => "incognito: this chat is not saved anywhere",
+            false => "incognito off: this chat will be saved",
+        };
+        self.info(msg.into());
     }
 
     /// Load chat `buf` again: as much of it as it had.
@@ -442,8 +464,11 @@ impl Gui {
         match self.chats[buf].session_id().map(str::to_owned) {
             Some(session_id) => self.queue(buf, session_id, text, images, mode),
             None => {
-                let cwd = Some(self.opts.cwd.clone());
-                self.request::<SessionCreate>(SessionCreateParams { cwd }, move |gui, r| match r {
+                let params = SessionCreateParams {
+                    cwd: Some(self.opts.cwd.clone()),
+                    incognito: self.chats[buf].incognito,
+                };
+                self.request::<SessionCreate>(params, move |gui, r| match r {
                     Ok(info) => {
                         let session_id = info.session_id.clone();
                         if let Some(c) = gui.chats.get_mut(buf) {

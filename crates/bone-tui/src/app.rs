@@ -471,12 +471,34 @@ impl App {
 
     /// A fresh session (created on the first message).
     pub fn new_session(&mut self) {
-        let c = &self.chats[self.current];
+        let c = &mut self.chats[self.current];
         if c.session.is_none() && c.entries.is_empty() && !c.starting {
+            // A new incognito chat becomes a plain one.
+            if c.incognito {
+                c.incognito = false;
+                self.dirty = true;
+            }
             return;
         }
         self.chats.push(ChatBuffer::new(None));
         self.show_chat(self.chats.len() - 1);
+    }
+
+    /// A fresh incognito chat: its session is kept in memory only. On a
+    /// chat not started yet, switches it between incognito and not.
+    pub fn new_incognito(&mut self) {
+        let c = &mut self.chats[self.current];
+        if c.session.is_none() && c.entries.is_empty() && !c.starting && c.loading.is_none() {
+            c.incognito = !c.incognito;
+        } else {
+            self.chats.push(ChatBuffer::new_incognito());
+            self.show_chat(self.chats.len() - 1);
+        }
+        match self.chats[self.current].incognito {
+            true => self.info("incognito: this chat is not saved anywhere"),
+            false => self.info("incognito off: this chat will be saved"),
+        }
+        self.dirty = true;
     }
 
     pub fn prompt_text(&self) -> String {
@@ -865,6 +887,7 @@ impl App {
                 }
             }
             NewSession => self.new_session(),
+            NewIncognito => self.new_incognito(),
             Sessions => self.open_picker(),
             FocusNext => input::cycle_focus(self, true),
             FocusPrev => input::cycle_focus(self, false),
@@ -1015,8 +1038,11 @@ impl App {
         match self.chats[buf].session_id() {
             Some(id) => self.start_turn(buf, id.to_owned(), draft),
             None => {
-                let cwd = Some(self.cwd.clone());
-                self.request::<SessionCreate>(SessionCreateParams { cwd }, move |app, r| match r {
+                let params = SessionCreateParams {
+                    cwd: Some(self.cwd.clone()),
+                    incognito: self.chats[buf].incognito,
+                };
+                self.request::<SessionCreate>(params, move |app, r| match r {
                     Ok(info) => {
                         let id = info.session_id.clone();
                         if let Some(c) = app.chat_mut(buf) {

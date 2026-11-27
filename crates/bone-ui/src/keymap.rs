@@ -103,6 +103,7 @@ builtins! {
     Quit = "quit",
     QuitIfEmpty = "quit_if_empty",
     NewSession = "new_session",
+    NewIncognito = "new_incognito",
     Sessions = "sessions",
     FocusNext = "focus_next",
     FocusPrev = "focus_prev",

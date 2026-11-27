@@ -276,6 +276,7 @@ async fn signals_end_the_shell_jobs_too() {
         let info = client
             .request::<SessionCreate>(SessionCreateParams {
                 cwd: Some(data.path().display().to_string()),
+                ..Default::default()
             })
             .await
             .unwrap();

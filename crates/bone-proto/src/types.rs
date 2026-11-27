@@ -157,6 +157,10 @@ pub struct SessionInfo {
     /// Out of the recent chats (`session/set`) until its next turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// Kept in memory only, never on disk (`session/create` with
+    /// `incognito`); listed until the core exits or it is deleted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incognito: bool,
 }
 
 /// Who started a session on its behalf: a tool call in another session.
