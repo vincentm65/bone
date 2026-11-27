@@ -278,6 +278,8 @@ impl Index {
                 owner: (r.get::<_, Option<String>>(5)?).and_then(|o| serde_json::from_str(&o).ok()),
                 pinned: r.get(6)?,
                 archived: r.get(7)?,
+                // Incognito sessions are never indexed.
+                incognito: false,
             })
         });
         let rows = rows.map_err(err)?.filter_map(|r| r.ok());

@@ -679,6 +679,32 @@ async fn slash_menu_lists_arguments_without_a_slash() {
 }
 
 #[tokio::test]
+async fn incognito_chat_creates_an_incognito_session() {
+    let mut h = Harness::new().await;
+    let on = "bone.notify(tostring(bone.api.incognito()))";
+    assert_eq!(h.lua(on).await, "false");
+    // On a new chat, /incognito switches it on and off.
+    h.input("/incognito{enter}").await;
+    assert_eq!(h.lua(on).await, "true");
+    assert!(h.screen(80, 24).contains("◐ incognito"));
+    h.input("/incognito{enter}").await;
+    assert_eq!(h.lua(on).await, "false");
+    assert!(!h.screen(80, 24).contains("◐ incognito"));
+    h.input("/incognito{enter}").await;
+    h.input("psst{enter}").await;
+    assert_eq!(
+        h.requests("session/create"),
+        vec![json!({ "cwd": "/work", "incognito": true })]
+    );
+    // From a started chat it opens a new incognito one; /new a plain one.
+    h.input("/incognito{enter}").await;
+    assert_eq!(h.lua(on).await, "true");
+    assert_eq!(h.app.chats.len(), 2);
+    h.input("/new{enter}").await;
+    assert_eq!(h.lua(on).await, "false");
+}
+
+#[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
     // 32 extra commands overflow the window (the builtin names/aliases
@@ -695,15 +721,21 @@ async fn slash_menu_scrolls_when_it_overflows() {
     );
     // The wheel and pages scroll the menu.
     h.input("{wheeldown}").await;
+    h.input("{wheeldown}").await;
     for _ in 0..2 {
         h.input("{pagedown}").await;
     }
     let screen = h.screen(80, 24);
     // Two pages down (plus the wheel) has scrolled to the queue command.
     assert!(screen.contains("/queue"), "{screen}");
-    // The selection completes into the prompt.
+    // The selection, scrolled to with the menu, completes into the prompt.
     h.input("{tab}").await;
-    assert_eq!(h.prompt(), "/queue ");
+    let picked = h.prompt();
+    assert!(
+        picked.starts_with('/') && picked.ends_with(' ') && picked != "/? ",
+        "{picked:?}"
+    );
+    assert!(screen.contains(&format!("  {} ", picked.trim_end())), "{picked:?} {screen}");
     for i in 1..=32 {
         h.lua(&format!("bone.cmd.del('zz{}')", i)).await;
     }

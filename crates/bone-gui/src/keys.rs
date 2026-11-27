@@ -577,6 +577,7 @@ impl Gui {
             Quit => self.closed = true,
             QuitIfEmpty if self.draft.is_empty() => self.closed = true,
             NewSession => self.new_chat(),
+            NewIncognito => self.new_incognito_chat(),
             Sessions => self.call_ui("sessions"),
             // Through the nodes the keyboard reaches, with the prompt
             // among them; without any, through the panels.

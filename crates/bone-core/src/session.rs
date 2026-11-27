@@ -175,7 +175,9 @@ pub struct Session {
     /// Where the working directory changed, in transcript order.
     moves: Vec<Move>,
     next_turn: TurnId,
-    file: File,
+    /// Where its records are appended; `None` for an incognito session,
+    /// which is kept in memory only.
+    file: Option<File>,
     path: PathBuf,
     index: Option<Arc<Index>>,
     /// Where the queue is kept.
@@ -234,13 +236,33 @@ impl Session {
             self.replays_reasoning = replays_reasoning;
         }
     }
+    /// Append `record` to the session's file (nothing for an incognito one).
+    fn write(&mut self, record: Record) -> std::io::Result<()> {
+        match &mut self.file {
+            Some(file) => write_record(file, record),
+            None => Ok(()),
+        }
+    }
+
+    fn write_timed(&mut self, record: Record, timing: ToolTiming) -> std::io::Result<()> {
+        match &mut self.file {
+            Some(file) => write_line(file, record, Some(timing)),
+            None => Ok(()),
+        }
+    }
+
+    /// Flush the file to disk (nothing for an incognito session).
+    fn sync(&self) -> std::io::Result<()> {
+        self.file.as_ref().map_or(Ok(()), File::sync_data)
+    }
+
     /// Append to the transcript and the file. A failed write is reported but
     /// the in-memory transcript still advances so the turn can continue.
     pub fn push(&mut self, msg: ChatMessage) -> std::io::Result<()> {
         if self.info.title.is_none() {
             self.info.title = title_of(&msg);
         }
-        let written = write_record(&mut self.file, Record::Message(msg.clone()));
+        let written = self.write(Record::Message(msg.clone()));
         self.messages.push(msg);
         self.reindex();
         written
@@ -251,7 +273,7 @@ impl Session {
         if let ChatMessage::Tool { call_id, .. } = &msg {
             self.tool_times.insert(call_id.clone(), timing);
         }
-        let written = write_line(&mut self.file, Record::Message(msg.clone()), Some(timing));
+        let written = self.write_timed(Record::Message(msg.clone()), timing);
         self.messages.push(msg);
         self.reindex();
         written
@@ -268,14 +290,14 @@ impl Session {
             timing,
         };
         self.turn_ends.push(end.clone());
-        let written = write_record(&mut self.file, Record::Turn(end));
+        let written = self.write(Record::Turn(end));
         self.reindex();
         written
     }
 
     /// Keep what a model call used (in the file, not the transcript).
     pub fn usage(&mut self, usage: UsageRecord) -> std::io::Result<()> {
-        let written = write_record(&mut self.file, Record::Usage(usage));
+        let written = self.write(Record::Usage(usage));
         self.reindex();
         written
     }
@@ -283,7 +305,7 @@ impl Session {
     /// Lock the session to `model` (kept in the file).
     pub fn pin(&mut self, model: Pin) -> std::io::Result<()> {
         self.model = Some(model.clone());
-        write_record(&mut self.file, Record::Model(model))
+        self.write(Record::Model(model))
     }
 
     /// Change its title, pinned or archived (`None` keeps one): a record for
@@ -301,7 +323,7 @@ impl Session {
         records.extend((pinned.filter(|&p| p != self.info.pinned)).map(Record::Pinned));
         records.extend((archived.filter(|&a| a != self.info.archived)).map(Record::Archived));
         for r in &records {
-            write_record(&mut self.file, r.clone())?;
+            self.write(r.clone())?;
             apply(&mut self.info, r);
         }
         let changed = !records.is_empty();
@@ -314,8 +336,8 @@ impl Session {
     /// Move to `cwd` (nothing moves if the file write fails): tools run there
     /// from the next turn on.
     pub fn cd(&mut self, cwd: String) -> std::io::Result<()> {
-        write_record(&mut self.file, Record::Cwd(cwd.clone()))?;
-        self.file.sync_data()?;
+        self.write(Record::Cwd(cwd.clone()))?;
+        self.sync()?;
         moved(
             &mut self.moves,
             self.messages.len(),
@@ -371,6 +393,9 @@ impl Session {
 
     /// Keep the queue on disk; an empty one is no file.
     pub fn save_queue(&self) -> std::io::Result<()> {
+        if self.info.incognito {
+            return Ok(());
+        }
         self.queue_dirty.set(true);
         if self.queue.is_empty() {
             match std::fs::remove_file(&self.queue_path) {
@@ -396,8 +421,9 @@ impl Session {
     pub fn compact(&mut self, messages: Vec<ChatMessage>) -> std::io::Result<()> {
         // Everything after the checkpoint builds on it: make sure it is on
         // disk, not only in the page cache, before going on.
-        let written = write_record(&mut self.file, Record::Compact(messages.clone()))
-            .and_then(|()| self.file.sync_data());
+        let written = self
+            .write(Record::Compact(messages.clone()))
+            .and_then(|()| self.sync());
         let kept = same_start(&self.messages, &messages);
         self.turn_ends.retain(|t| t.messages <= kept);
         self.messages = messages;
@@ -412,8 +438,9 @@ impl Session {
     /// Set (or clear) the summary the model gets in place of the
     /// transcript's older part.
     pub fn summarize(&mut self, summary: Option<Summary>) -> std::io::Result<()> {
-        let written = write_record(&mut self.file, Record::Summary(summary.clone()))
-            .and_then(|()| self.file.sync_data());
+        let written = self
+            .write(Record::Summary(summary.clone()))
+            .and_then(|()| self.sync());
         self.summary = summary;
         written
     }
@@ -515,10 +542,17 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, &[], None, None)
+        self.create_with(cwd, None, &[], None, None, false)
+    }
+
+    /// A new session kept in memory only: no file, index entry or queue
+    /// file; gone when the core exits or it is deleted.
+    pub fn create_incognito(&self, cwd: String) -> Result<SessionHandle, SessionError> {
+        self.create_with(cwd, None, &[], None, None, true)
     }
 
     /// A new session starting with messages, an optional summary and model.
+    /// An `incognito` one is never written to disk.
     pub(crate) fn create_with(
         &self,
         cwd: String,
@@ -526,8 +560,8 @@ impl SessionStore {
         messages: &[ChatMessage],
         summary: Option<Summary>,
         model: Option<Pin>,
+        incognito: bool,
     ) -> Result<SessionHandle, SessionError> {
-        std::fs::create_dir_all(&self.dir)?;
         let header = Header {
             session_id: uuid::Uuid::now_v7().to_string(),
             cwd,
@@ -535,11 +569,6 @@ impl SessionStore {
             parent: None,
             owner,
         };
-        let path = self.path(&header.session_id);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)?;
         let info = SessionInfo {
             session_id: header.session_id.clone(),
             cwd: header.cwd.clone(),
@@ -547,18 +576,30 @@ impl SessionStore {
             title: messages.iter().find_map(title_of),
             parent: header.parent.clone(),
             owner: header.owner.clone(),
+            incognito,
             ..Default::default()
         };
-        write_record(&mut file, Record::Session(header))?;
-        for m in messages {
-            write_record(&mut file, Record::Message(m.clone()))?;
-        }
-        if summary.is_some() {
-            write_record(&mut file, Record::Summary(summary.clone()))?;
-        }
-        if let Some(model) = &model {
-            write_record(&mut file, Record::Model(model.clone()))?;
-        }
+        let file = if incognito {
+            None
+        } else {
+            std::fs::create_dir_all(&self.dir)?;
+            let path = self.path(&header.session_id);
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .open(&path)?;
+            write_record(&mut file, Record::Session(header))?;
+            for m in messages {
+                write_record(&mut file, Record::Message(m.clone()))?;
+            }
+            if summary.is_some() {
+                write_record(&mut file, Record::Summary(summary.clone()))?;
+            }
+            if let Some(model) = &model {
+                write_record(&mut file, Record::Model(model.clone()))?;
+            }
+            Some(file)
+        };
         let users = messages
             .iter()
             .filter(|m| matches!(m, ChatMessage::User { .. }))
@@ -610,7 +651,7 @@ impl SessionStore {
         }
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
-        let session = self.open(info, messages, summary, model, users, file);
+        let session = self.open(info, messages, summary, model, users, Some(file));
         session.lock().unwrap().tool_times = tool_times;
         session.lock().unwrap().turn_ends = turn_ends;
         session.lock().unwrap().moves = moves;
@@ -634,14 +675,19 @@ impl SessionStore {
         summary: Option<Summary>,
         model: Option<Pin>,
         users: usize,
-        file: File,
+        file: Option<File>,
     ) -> SessionHandle {
         let path = self.path(&info.session_id);
         let queue_path = self.queue_path(&info.session_id);
-        let saved: Vec<QueuedMessage> = std::fs::read_to_string(&queue_path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let saved: Vec<QueuedMessage> = match info.incognito {
+            true => Vec::new(),
+            false => std::fs::read_to_string(&queue_path)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default(),
+        };
+        // Nothing of an incognito session reaches the index either.
+        let index = (!info.incognito).then(|| self.index.clone()).flatten();
         // A clock set back must not give out an id still waiting here.
         let last = saved.iter().map(|q| q.id).max().unwrap_or(0);
         QUEUE_ID.fetch_max(last, Ordering::Relaxed);
@@ -670,13 +716,14 @@ impl SessionStore {
             next_turn: users as TurnId,
             file,
             path,
-            index: self.index.clone(),
+            index,
         }))
     }
 
     /// Hold `session` in memory (or the one another caller loaded meanwhile)
     /// and drop the least recently used idle ones past `MAX_LOADED`: those
     /// nothing else holds, with no turn, queue, unsaved edits or compaction.
+    /// Incognito sessions stay: memory is the only place they are.
     fn keep(&self, id: &str, session: SessionHandle) -> SessionHandle {
         let mut loaded = self.loaded.lock().unwrap();
         let used = self.tick.fetch_add(1, Ordering::Relaxed);
@@ -690,7 +737,8 @@ impl SessionStore {
                 .filter(|(_, (s, _))| {
                     Arc::strong_count(s) == 1
                         && s.try_lock().is_ok_and(|s| {
-                            s.active.is_none()
+                            !s.info.incognito
+                                && s.active.is_none()
                                 && s.queue.is_empty()
                                 && !s.queue_dirty.get()
                                 && !s.compacting
@@ -706,8 +754,11 @@ impl SessionStore {
 
     /// Remove a session from memory and disk.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
-        self.get(id)?;
+        let incognito = self.get(id)?.lock().unwrap().info.incognito;
         self.loaded.lock().unwrap().remove(id);
+        if incognito {
+            return Ok(());
+        }
         std::fs::remove_file(self.path(id))?;
         let _ = std::fs::remove_file(self.queue_path(id));
         if let Some(index) = &self.index {
@@ -808,6 +859,11 @@ impl SessionStore {
                 None => (indexed.remove(&id)).or_else(|| read_file(&path, 1).ok().map(|l| l.info)),
             })
             .collect();
+        // Incognito sessions have no file: they are listed from memory.
+        out.extend((loaded.values()).filter_map(|(s, _)| {
+            let s = s.lock().unwrap();
+            s.info.incognito.then(|| s.info.clone())
+        }));
         // UUIDv7 ids sort by creation time.
         out.sort_by(|a, b| b.session_id.cmp(&a.session_id));
         Ok(out)
@@ -1075,6 +1131,7 @@ mod tests {
                     &s.messages,
                     s.summary.clone(),
                     None,
+                    false,
                 )
                 .unwrap()
         };
@@ -1131,6 +1188,7 @@ mod tests {
                 &messages,
                 summary.clone(),
                 Some(model.clone()),
+                false,
             )
             .unwrap();
         let id = {
@@ -1399,6 +1457,75 @@ mod tests {
             json!({"columns": ["n"], "rows": [[1]], "truncated": false})
         );
         assert!(index.query("SELEC nope", &serde_json::Value::Null).is_err());
+    }
+
+    #[test]
+    fn incognito_sessions_never_reach_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        // An ordinary session, so the directory and index exist.
+        store.create("/plain".into()).unwrap();
+        let s = store.create_incognito("/w".into()).unwrap();
+        let id = s.lock().unwrap().info.session_id.clone();
+        {
+            let mut s = s.lock().unwrap();
+            assert!(s.info.incognito);
+            let user = ChatMessage::User {
+                content: "secret question".into(),
+                images: Vec::new(),
+                source: None,
+            };
+            let reply: ChatMessage = serde_json::from_value(
+                serde_json::json!({ "role": "assistant", "content": "secret reply" }),
+            )
+            .unwrap();
+            s.push(user.clone()).unwrap();
+            s.push(reply).unwrap();
+            s.set(Some("secret title"), Some(true), None).unwrap();
+            s.cd("/secret-dir".into()).unwrap();
+            s.pin((Some("p".into()), "secret-model".into())).unwrap();
+            s.summarize(Some(Summary {
+                through: 1,
+                text: "secret summary".into(),
+            }))
+            .unwrap();
+            s.compact(vec![user]).unwrap();
+            s.enqueue_with_images("secret queued".into(), QueueMode::Next, Vec::new(), None);
+            s.save_queue().unwrap();
+            assert_eq!(s.messages.len(), 1);
+            assert_eq!(s.info.title.as_deref(), Some("secret title"));
+        }
+        // Not evicted to make room: memory is the only place it is.
+        for _ in 0..MAX_LOADED + 4 {
+            store.create("/more".into()).unwrap();
+        }
+        store.catch_up();
+        assert!(store.get(&id).is_ok());
+        let listed = store.list().unwrap();
+        assert!(listed.iter().any(|i| i.session_id == id && i.incognito));
+        assert!(!store.index().unwrap().sessions().unwrap().contains_key(&id));
+        // Nothing of it anywhere under the data dir: not its id, not its text.
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out)
+                } else {
+                    out.push(p)
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(dir.path(), &mut files);
+        for f in &files {
+            let bytes = std::fs::read(f).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("secret"), "{} has the chat", f.display());
+            assert!(!text.contains(&id), "{} has its id", f.display());
+        }
+        store.delete(&id).unwrap();
+        assert!(store.get(&id).is_err());
+        assert!(!store.list().unwrap().iter().any(|i| i.session_id == id));
     }
 
     #[test]

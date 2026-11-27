@@ -180,9 +180,11 @@ end
 ---   bone.session.create(opts)          a new session: opts = { cwd?, title?,
 ---                                      messages?, summary? = { through, text },
 ---                                      model? = { provider?, model },
----                                      owner? = { session_id, call_id?, name? } }
----                                      (a subagent's; cwd and model default to
----                                      the owner's). messages accepts tables or raw JSON
+---                                      owner? = { session_id, call_id?, name? },
+---                                      incognito? } (a subagent's; cwd and model
+---                                      default to the owner's, and an incognito
+---                                      owner's is incognito: kept in memory only,
+---                                      never on disk). messages accepts tables or raw JSON
 ---                                      strings from snapshot.raw_messages. Returns
 ---                                      its info.
 ---   bone.session.cd(id, dir)           move an idle session to another working
@@ -230,6 +232,7 @@ function bone.session.create(opts)
   return session_op("create", nil, {
     cwd = opts.cwd, title = opts.title, owner = opts.owner,
     messages = opts.messages, summary = opts.summary, model = opts.model,
+    incognito = opts.incognito,
   })
 end
 function bone.session.run(id, text)

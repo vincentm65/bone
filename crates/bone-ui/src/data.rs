@@ -224,6 +224,7 @@ pub fn session<L>(chat: &ChatBuffer<L>, buf: Option<usize>, current: bool) -> Js
     };
     v["title"] = json!(chat.title());
     v["new"] = json!(chat.session.is_none() && chat.loading.is_none());
+    v["incognito"] = json!(chat.incognito());
     v["loading"] = json!(chat.loading);
     v["chat"] = json!(buf);
     v["current"] = json!(current);
@@ -255,6 +256,7 @@ pub fn sessions<L>(chats: &[ChatBuffer<L>], current: usize) -> Vec<Json> {
                 "session_id": c.session_id(),
                 "title": c.title(),
                 "new": c.session.is_none(),
+                "incognito": c.incognito(),
                 "current": b == current,
                 "running": c.turn.is_some() || c.starting,
             })

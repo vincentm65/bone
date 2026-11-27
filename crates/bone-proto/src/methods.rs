@@ -328,6 +328,10 @@ pub struct SessionCreateParams {
     /// Working directory for tools. Defaults to the server's cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Keep the session in memory only: nothing of it is written to disk
+    /// (no session file, index or queue) and it is gone when the core exits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incognito: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

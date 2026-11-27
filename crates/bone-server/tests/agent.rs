@@ -109,6 +109,7 @@ async fn turn_with_tool_call_over_http() {
     let info = client
         .request::<SessionCreate>(SessionCreateParams {
             cwd: Some(work.path().to_string_lossy().into()),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -217,6 +218,7 @@ async fn lua_tool_and_hooks_over_http() {
     let info = client
         .request::<SessionCreate>(SessionCreateParams {
             cwd: Some(work.path().to_string_lossy().into()),
+            ..Default::default()
         })
         .await
         .unwrap();

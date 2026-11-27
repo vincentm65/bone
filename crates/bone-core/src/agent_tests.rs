@@ -180,6 +180,7 @@ impl Harness {
         let info: SessionInfo = h
             .call::<SessionCreate>(SessionCreateParams {
                 cwd: Some(h.work.path().to_string_lossy().into()),
+                ..Default::default()
             })
             .await
             .unwrap();

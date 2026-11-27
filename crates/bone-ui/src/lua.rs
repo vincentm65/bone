@@ -431,6 +431,7 @@ pub fn dispatch<H: Host>(
         "notify" => notify(h, lua, a),
         "settings_get" => json(lua, h.settings()),
         "session" => session(h, lua),
+        "incognito" => incognito(h, lua),
         "cwd" => ret(lua, h.cwd().to_owned()),
         "cd" => args::<String>(lua, a).and_then(|dir| {
             h.set_cwd(dir);
@@ -1660,7 +1661,19 @@ fn session<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
     t.set("cwd", s.cwd.as_str())?;
     t.set("title", s.title.clone())?;
     t.set("running", c.turn.is_some())?;
+    t.set("incognito", s.incognito)?;
     ret(lua, t)
+}
+
+/// `bone.api.incognito()`: whether the target chat is kept off disk (its
+/// session is incognito, or a new chat's will be).
+fn incognito<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let target = h.target_chat();
+    let c = h.chat_store();
+    let on = target
+        .and_then(|b| c.chats.get(b))
+        .is_some_and(|c| c.incognito());
+    ret(lua, on)
 }
 
 fn prompt_images<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {

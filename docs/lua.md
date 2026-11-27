@@ -599,7 +599,7 @@ independent of popups, but a focused popup always has precedence.
 
 Key names: `ctrl+`, `alt+`, `shift+` and `super+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
 
-Builtin actions: `submit queue_steer queue_next paste_clipboard newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
+Builtin actions: `submit queue_steer queue_next paste_clipboard newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session new_incognito sessions focus_next focus_prev focus_prompt`.
 
 `submit` during a turn queues the message in the core with `bone.o.queue_mode` (`"steer"`, the default, or `"next"`); `queue_steer` and `queue_next` pick the mode regardless. Up on an empty prompt edits the last queued message in place, and the tray's Queue page edits, reorders, steers or drops any of them (`runtime/lua/bone/ui/tray.lua`).
 
@@ -838,7 +838,8 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`, `bone.prompt.history_add(text)` (up/down recall of a command in the chat on screen; up/down recalls that chat's sent messages from its transcript)
 - `bone.api.log(n)` (the last n messages), `bone.api.show(text)` (show without logging), `bone.api.colors_name()`, `bone.api.exec_lua(code)` and `bone.api.source(path)` (run Lua / a Lua file)
-- `bone.api.session()` → `{ session_id, cwd, title, running }` or `nil`
+- `bone.api.session()` → `{ session_id, cwd, title, running, incognito }` or `nil`
+- `bone.api.incognito()` → whether the chat on screen is incognito: kept in memory only, never written to disk (its session is, or a new chat's will be once its first message creates it). `new_incognito` (`/incognito`) opens one.
 - `bone.api.cwd()` → the directory new sessions start in (where bone was started, until changed); `bone.api.cd(dir)` changes it, taking the path as given (`/cd` is what checks it). A session that exists is moved with `bone.request("session/cd", { session_id, cwd })`, which is what `/cd` does with one open.
 - `bone.strwidth(s)`: display width in columns.
 - `bone.ui.win{ lines, width, height, anchor, row, col, z, focus, keys, on_key, guard }` → id: a window drawn over the screen. Lua draws every cell; Rust only places it and clears what is behind it.

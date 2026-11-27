@@ -170,6 +170,7 @@ fn requests() {
         4,
         SessionCreateParams {
             cwd: Some("/home/me/project".into()),
+            ..Default::default()
         },
         SessionInfo {
             title: None,
