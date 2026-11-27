@@ -130,10 +130,11 @@ local function layout()
   append("help")
   if state.loading or #state.items == 0 then append("status") end
   -- A rule above each header (after a blank, below a chat), and a blank
-  -- line between two chats.
+  -- line between two chats: a click on it opens the chat above, so the
+  -- title is not a one-line target.
   for i, r in ipairs(state.items) do
     local prev = state.items[i - 1]
-    if prev and prev.kind == "chat" then append("blank") end
+    if prev and prev.kind == "chat" then state.hits[append("blank")] = i - 1 end
     if r.kind == "header" then append("separator") end
     local line = append(r.kind == "header" and "header" or "title", i)
     state.lines[i], state.hits[line] = line, i
